@@ -165,11 +165,12 @@ export function toLead(c: Comment, note?: Note): Lead {
     createdAt: new Date().toISOString(),
   };
 }
-export function assessComment(c: Comment, note?: Note) {
+export function assessComment(c: Comment, note?: Note, now = Date.now()) {
   const result = intentScore(
     c.body,
     c.createdAt,
     note ? [note.title, note.body, ...note.tags].join('\n') : '',
+    now,
   );
   if (result.stage !== 'restricted' && c.authorId && c.authorId === note?.authorId) {
     const reason = '作品作者自己的评论或回复，不作为潜在购买客户';
@@ -183,6 +184,44 @@ export function assessComment(c: Comment, note?: Note) {
     };
   }
   return result;
+}
+/** Sampling priority, not a lead score or an estimate of conversion. */
+export function acquisitionPriority(note: Note, comments: Comment[], now = Date.now()) {
+  const context = [note.title, note.body, ...note.tags].join('\n');
+  if (intentScore('', '', context, now).stage === 'restricted')
+    return { tier: -1, weight: 0, reason: '敏感主题：仅作内容研究，不建立个人营销画像' };
+  const sample = comments.filter((c) => c.noteId === note.id && c.source === note.source);
+  const recent = sample.filter((c) => {
+    const a = assessComment(c, note, now);
+    return a.ageDays !== null && a.ageDays <= 7 && !a.exclusions.length && !!c.body.trim();
+  });
+  const needs = recent.filter((c) => assessComment(c, note, now).recommended);
+  const people = new Set(needs.map((c) => c.authorId || c.id)).size;
+  if (people)
+    return {
+      tier: 3,
+      weight: Math.min(people, 20),
+      reason: `已读样本中有 ${people} 位近7天明确需求者，优先复核`,
+    };
+  if (recent.length)
+    return {
+      tier: 2,
+      weight: Math.min(recent.length, 20),
+      reason: `已读样本有 ${recent.length} 条近7天讨论，暂未发现明确需求`,
+    };
+  const time = Date.parse(note.publishedAt);
+  const age =
+    Number.isFinite(time) && time <= now + 300000 ? Math.max(0, (now - time) / 86400000) : null;
+  const freshness = age === null ? 0 : age <= 7 ? 10 : age <= 30 ? 5 : 0;
+  if (note.comments > 0)
+    return {
+      tier: 1,
+      weight: freshness + Math.min(10, Math.log2(note.comments + 1)),
+      reason: sample.length
+        ? '已读样本未见近7天需求；可按需补查，勿当作确认客户'
+        : `平台显示 ${note.comments} 条评论，日期与需求待采样核实`,
+    };
+  return { tier: 0, weight: freshness, reason: '暂无评论信号，暂缓采集；点赞不等于购买需求' };
 }
 export function viralScore(n: Note) {
   return Math.round(n.likes + n.comments * 3 + n.saves * 2);

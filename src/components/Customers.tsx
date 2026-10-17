@@ -32,8 +32,8 @@ export function Comments() {
     [limit, setLimit] = useState(60),
     [interval, setInterval] = useState(data.settings.mode === 'live' ? 15000 : 1000),
     [query, setQuery] = useState(''),
-    [days, setDays] = useState('all'),
-    [kind, setKind] = useState('all'),
+    [days, setDays] = useState(data.settings.mode === 'live' ? '7' : 'all'),
+    [kind, setKind] = useState(data.settings.mode === 'live' ? 'intent' : 'all'),
     [view, setView] = useState('terminal'),
     [selected, setSelected] = useState<string[]>([]),
     [busy, setBusy] = useState(false),
@@ -50,17 +50,21 @@ export function Comments() {
       c,
       data.notes.find((n) => n.id === c.noteId),
     );
-  const shown = comments.filter(
-    (c) =>
-      (kind === 'all' ||
-        (kind === 'root' && !c.parentId) ||
-        (kind === 'reply' && !!c.parentId) ||
-        (kind === 'intent' && assessment(c).recommended)) &&
-      (days === 'all' ||
-        (assessment(c).ageDays !== null && assessment(c).ageDays! <= Number(days))) &&
-      (!query ||
-        [c.author, c.body, c.region].join(' ').toLowerCase().includes(query.toLowerCase())),
-  );
+  const shown = comments
+    .filter(
+      (c) =>
+        (kind === 'all' ||
+          (kind === 'root' && !c.parentId) ||
+          (kind === 'reply' && !!c.parentId) ||
+          (kind === 'intent' && assessment(c).recommended)) &&
+        (days === 'all' ||
+          (assessment(c).ageDays !== null && assessment(c).ageDays! <= Number(days))) &&
+        (!query ||
+          [c.author, c.body, c.region].join(' ').toLowerCase().includes(query.toLowerCase())),
+    )
+    .sort(
+      (a, b) => assessment(b).score - assessment(a).score || b.createdAt.localeCompare(a.createdAt),
+    );
   async function start() {
     if (!noteId) return;
     setBusy(true);
@@ -227,7 +231,9 @@ export function Comments() {
               <span>从对话里发现机会</span>
               <Flame size={14} />
             </div>
-            <p>包含「价格」「预约」「求推荐」等词语的评论，可能有更明确的需求。</p>
+            <p>
+              优先看近7天的购买咨询；近3天先跟进，8–30天先确认需求是否仍在。作品旧不代表评论里的需求旧。
+            </p>
             <button onClick={() => setKind('intent')}>
               筛选高意向评论
               <ArrowRight size={12} />
@@ -436,11 +442,22 @@ export function Comments() {
               </div>
             ) : (
               <Empty
-                title="听见客户的第一句话"
-                sub="从左侧选择作品，采集评论后即可查看用户需求。"
+                title={comments.length ? '当前筛选下暂无候选线索' : '听见客户的第一句话'}
+                sub={
+                  comments.length
+                    ? `已采集 ${comments.length} 条评论，尚未匹配当前时间或意向条件；可查看全部评论，不代表采集失败。`
+                    : '从左侧选择作品，采集评论后即可查看用户需求。'
+                }
                 action={
-                  <button className="btn" onClick={() => navigate('discover')}>
-                    去发现作品
+                  <button
+                    className="btn"
+                    onClick={() =>
+                      comments.length
+                        ? (setDays('all'), setKind('all'), setQuery(''))
+                        : navigate('discover')
+                    }
+                  >
+                    {comments.length ? '查看全部评论' : '去发现作品'}
                     <ArrowRight size={14} />
                   </button>
                 }

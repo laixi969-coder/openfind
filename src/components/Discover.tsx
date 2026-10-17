@@ -35,6 +35,7 @@ import type { Note, Job, SearchInput, Platform } from '../../shared/types';
 import { api, shortNum, saveFile, exportUrl, safeUrl, downloadExport } from '../api';
 import { useWorkspace } from '../context';
 import { Empty, Busy, SourceTag, PageHeading, Modal, ExternalLink } from './ui';
+import { acquisitionPriority } from '../../server/domain';
 export function Discover() {
   const { data, notify, refresh, navigate, clone, collect } = useWorkspace();
   const params = new URLSearchParams(location.search);
@@ -53,8 +54,8 @@ export function Discover() {
       : data.settings.platform || 'xiaohongshu',
   );
   const [keyword, setKeyword] = useState(initialJob?.keyword || '家居'),
-    [limit, setLimit] = useState(100),
-    [sort, setSort] = useState<SearchInput['sort']>(initialJob?.query?.sort || 'general'),
+    [limit, setLimit] = useState(20),
+    [sort, setSort] = useState<SearchInput['sort']>(initialJob?.query?.sort || 'latest'),
     [noteType, setNoteType] = useState<SearchInput['noteType']>(
       initialJob?.query?.noteType || 'all',
     ),
@@ -65,7 +66,9 @@ export function Discover() {
     [query, setQuery] = useState(''),
     [view, setView] = useState<'cards' | 'logs'>('cards'),
     [filter, setFilter] = useState('all'),
-    [resultSort, setResultSort] = useState('default'),
+    [resultSort, setResultSort] = useState(
+      data.settings.mode === 'live' ? 'acquisition' : 'default',
+    ),
     [selected, setSelected] = useState<string[]>([]),
     [advanced, setAdvanced] = useState(false),
     [forceRefresh, setForceRefresh] = useState(false),
@@ -82,6 +85,10 @@ export function Discover() {
     const byId = new Map(data.notes.map((n) => [n.id, n]));
     return (job?.resultIds || []).map((id) => byId.get(id)).filter((n): n is Note => !!n);
   }, [data.notes, job]);
+  const priorities = useMemo(
+    () => new Map(notes.map((n) => [n.id, acquisitionPriority(n, data.comments)])),
+    [notes, data.comments],
+  );
   const shown = useMemo(() => {
     let n = notes.filter(
       (n) =>
@@ -100,8 +107,16 @@ export function Discover() {
     if (resultSort === 'comments') n = n.sort((a, b) => b.comments - a.comments);
     if (resultSort === 'saves') n = n.sort((a, b) => b.saves - a.saves);
     if (resultSort === 'latest') n = n.sort((a, b) => b.publishedAt.localeCompare(a.publishedAt));
+    if (resultSort === 'acquisition')
+      n = n.sort((a, b) => {
+        const pa = priorities.get(a.id)!,
+          pb = priorities.get(b.id)!;
+        return (
+          pb.tier - pa.tier || pb.weight - pa.weight || b.publishedAt.localeCompare(a.publishedAt)
+        );
+      });
     return n;
-  }, [notes, query, filter, resultSort, selected]);
+  }, [notes, query, filter, resultSort, selected, priorities]);
   async function start(overrides: Partial<SearchInput> = {}) {
     setBusy(true);
     try {
@@ -310,6 +325,28 @@ export function Discover() {
               void start();
             }}
           >
+            <div className="field-hint">组合获客：先搜近期作品，再按评论需求选采集对象。</div>
+            <div className="prompt-examples" aria-label="获客搜索策略">
+              {(
+                [
+                  ['latest', '近期需求（主线）', 20],
+                  ['general', '相关作品（补充）', 20],
+                  ['popular', '高互动（少量探索）', 10],
+                ] as const
+              ).map(([value, label, count]) => (
+                <button
+                  type="button"
+                  key={value}
+                  onClick={() => {
+                    setSort(value);
+                    setLimit(count);
+                    setResultSort('acquisition');
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
             <label className="field-label" htmlFor="collection">
               采集功能
             </label>
@@ -662,6 +699,7 @@ export function Discover() {
                   value={resultSort}
                   onChange={(e) => setResultSort(e.target.value)}
                 >
+                  <option value="acquisition">获客优先（需求＋时效）</option>
                   <option value="default">默认排序</option>
                   <option value="likes">点赞最多</option>
                   <option value="comments">评论最多</option>
@@ -670,6 +708,11 @@ export function Discover() {
                 </select>
               </div>
             </div>
+            {resultSort === 'acquisition' && (
+              <p className="field-hint" style={{ padding: '0 16px' }}>
+                下方按本机已读评论的需求与时效重排；无评论样本时使用作品日期和评论数初筛，点赞量不决定客户意向。
+              </p>
+            )}
             <div className="live-bar">
               <span>
                 <i /> LIVE
@@ -708,6 +751,9 @@ export function Discover() {
                       <NoteCard
                         key={n.id}
                         note={n}
+                        priorityReason={
+                          resultSort === 'acquisition' ? priorities.get(n.id)?.reason : undefined
+                        }
                         selected={selected.includes(n.id)}
                         toggle={() => toggle(n.id)}
                         onDetail={() => setDetail(n)}
@@ -888,6 +934,7 @@ export function NoteCard({
   onDetail,
   onClone,
   onCollect,
+  priorityReason,
 }: {
   note: Note;
   selected: boolean;
@@ -895,6 +942,7 @@ export function NoteCard({
   onDetail: () => void;
   onClone: () => void;
   onCollect: () => void;
+  priorityReason?: string;
 }) {
   return (
     <article className={`note-card ${selected ? 'selected' : ''}`}>
@@ -941,6 +989,7 @@ export function NoteCard({
         </div>
       </div>
       <div className="note-card-body">
+        {priorityReason && <p className="field-hint">{priorityReason}</p>}
         <button className="note-title" onClick={onDetail}>
           {n.title}
         </button>
