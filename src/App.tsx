@@ -24,11 +24,13 @@ import {
 import type { Snapshot, Note, Draft, Job } from '../shared/types';
 import { api, getState } from './api';
 import { WorkspaceContext, type Page } from './context';
+import { Acquisition } from './components/Acquisition';
 import { Discover } from './components/Discover';
 import { Comments, Leads } from './components/Customers';
 import { Studio, Editor } from './components/Studio';
 import { SettingsPage, HistoryPage, Guide } from './components/System';
 const navs: { id: Page; name: string; icon: typeof Search }[] = [
+  { id: 'acquisition', name: '一键获客', icon: Workflow },
   { id: 'discover', name: '发现作品', icon: Compass },
   { id: 'comments', name: '客户采集', icon: MessageSquareText },
   { id: 'leads', name: '客户线索', icon: Users },
@@ -130,7 +132,12 @@ export default function App() {
         )}
       </div>
     );
-  const running = data.jobs.filter((j) => j.status === 'running').length;
+  const activeFlows = data.workflows.filter((w) => w.status === 'running');
+  const running =
+    activeFlows.length +
+    data.jobs.filter(
+      (j) => j.status === 'running' && !activeFlows.some((w) => w.currentJobId === j.id),
+    ).length;
   return (
     <WorkspaceContext.Provider
       value={{
@@ -271,6 +278,7 @@ export default function App() {
                 与本地服务的连接中断，正在重试。{error}
               </div>
             )}
+            {page === 'acquisition' && <Acquisition />}
             {page === 'discover' && <Discover />}
             {page === 'comments' && <Comments />}
             {page === 'leads' && <Leads />}
@@ -300,7 +308,10 @@ export default function App() {
           </div>
         )}
         {running > 0 && (
-          <button className="running-indicator" onClick={() => navigate('history')}>
+          <button
+            className="running-indicator"
+            onClick={() => navigate(activeFlows.length ? 'acquisition' : 'history')}
+          >
             <Radio size={15} />
             {running} 个任务正在运行
           </button>

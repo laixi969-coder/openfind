@@ -80,7 +80,9 @@ export function Discover() {
     (j) => j.type === 'search' && (j.platform || 'xiaohongshu') === platform,
   );
   const job = searches.find((j) => j.id === jobId) || searches[0];
-  const running = data.jobs.some((j) => j.status === 'running');
+  const running =
+    data.jobs.some((j) => j.status === 'running') ||
+    data.workflows.some((w) => w.status === 'running');
   const notes = useMemo(() => {
     const byId = new Map(data.notes.map((n) => [n.id, n]));
     return (job?.resultIds || []).map((id) => byId.get(id)).filter((n): n is Note => !!n);
@@ -224,6 +226,12 @@ export function Discover() {
   ];
   return (
     <>
+      <div className="acquisition-entry">
+        <span>把搜索、评论采集与候选判断一次完成</span>
+        <button className="btn primary" onClick={() => navigate('acquisition')}>
+          打开一键获客 <ArrowRight size={14} />
+        </button>
+      </div>
       <PageHeading
         eyebrow="DISCOVER & CONNECT"
         title="让好内容，带来新客户。"

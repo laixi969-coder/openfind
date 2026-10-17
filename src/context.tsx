@@ -1,6 +1,7 @@
 import { createContext, useContext } from 'react';
 import type { Snapshot, Note, Draft } from '../shared/types';
-export type Page = 'discover' | 'comments' | 'leads' | 'studio' | 'history' | 'settings';
+export type Page =
+  'acquisition' | 'discover' | 'comments' | 'leads' | 'studio' | 'history' | 'settings';
 export interface Workspace {
   data: Snapshot;
   refresh: () => Promise<void>;

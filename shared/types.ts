@@ -26,6 +26,7 @@ export interface Note {
   cover: string;
   likes: number;
   comments: number;
+  commentCountKnown?: boolean;
   saves: number;
   publishedAt: string;
   tags: string[];
@@ -154,6 +155,7 @@ export interface Account {
   createdAt: string;
 }
 export interface Snapshot {
+  workflows: AcquisitionWorkflow[];
   connections?: PlatformConnection[];
   accounts: Account[];
   notes: Note[];
@@ -162,4 +164,32 @@ export interface Snapshot {
   drafts: Draft[];
   jobs: Job[];
   settings: Settings;
+}
+export interface AcquisitionInput {
+  keyword: string;
+  platform: Platform;
+  mode: Mode;
+  searchLimit: number;
+  maxNotes: number;
+  commentLimit: number;
+  supplement: boolean;
+}
+export interface AcquisitionWorkflow {
+  id: string;
+  input: AcquisitionInput;
+  status: 'running' | 'paused' | 'completed';
+  stage: 'search' | 'comments' | 'assess' | 'done';
+  searchIndex: number;
+  searchJobIds: string[];
+  noteIds: string[];
+  selectedNoteIds: string[];
+  completedNoteIds: string[];
+  commentIds: string[];
+  leadIds: string[];
+  currentJobId?: string;
+  message: string;
+  logs: Log[];
+  createdAt: string;
+  updatedAt: string;
+  finishedAt?: string;
 }

@@ -29,3 +29,7 @@
 
 - [抖音视频搜索管理](https://open.douyin.com/platform/resource/docs/ability/search-management/video/)面向获批的自有品牌或产品关键词评价、咨询处理，并强调时效；不是无限制采集竞品客户的通用授权。该官方API只返回最近一天作品，不能将此限制误当成网页版搜索规则。
 - [巨量引擎广告目标说明](https://school.oceanengine.com/product_help/content/668400000006/121544)区分点赞、评论等互动目标与有效咨询、留资等线索目标。以上组合策略是OpenFind的产品判断，不是平台推荐或保量承诺。
+
+## 一键执行入口
+
+上述步骤现可在侧栏「一键获客」串行执行，保留人工复核候选的环节。默认最多3篇评论采样，结果不足时才补充搜索；这不等于后台按60/30/10持续运行。检查点、恢复和额度规则见 [一键流程说明](ONE_CLICK_ACQUISITION.md)。

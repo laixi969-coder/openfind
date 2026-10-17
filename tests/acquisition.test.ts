@@ -43,3 +43,13 @@ test('Sampling priority does not cross note/source boundaries or build sensitive
   assert.equal(acquisitionPriority(note, [{ ...comment, source: 'live' }], now).tier, 1);
   assert.equal(acquisitionPriority({ ...note, title: 'HPV治疗' }, [comment], now).tier, -1);
 });
+
+test('Missing search comment counts are eligible for sampling rather than classified as zero', () => {
+  const unknown = acquisitionPriority({ ...note, comments: 0, commentCountKnown: false }, [], now);
+  assert.equal(unknown.tier, 1);
+  assert.match(unknown.reason, /未提供/);
+  assert.equal(
+    acquisitionPriority({ ...note, comments: 0, commentCountKnown: true }, [], now).tier,
+    0,
+  );
+});

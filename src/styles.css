@@ -4219,3 +4219,320 @@ blockquote {
   font-size: 9px;
   padding: 7px 9px;
 }
+
+/* Acquisition orchestration */
+.acquisition-entry,
+.acquisition-intro,
+.acquisition-toolbar,
+.acquisition-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.acquisition-entry {
+  justify-content: space-between;
+  margin-bottom: 20px;
+  padding: 14px 18px;
+  border: 1px solid #dbe5df;
+  background: #f4f8f5;
+  border-radius: 12px;
+  font-size: 12px;
+}
+.acquisition-setup,
+.acquisition-results {
+  background: #fff;
+  border: 1px solid #e6e8ec;
+  border-radius: 14px;
+  padding: 24px;
+  margin-bottom: 22px;
+  min-width: 0;
+}
+.acquisition-intro {
+  margin-bottom: 22px;
+}
+.acquisition-intro h2,
+.acquisition-toolbar h2 {
+  font-size: 17px;
+  margin: 0;
+}
+.acquisition-intro p {
+  font-size: 12px;
+  color: #76818c;
+  margin: 6px 0 0;
+}
+.acquisition-fields {
+  display: grid;
+  grid-template-columns: 130px minmax(180px, 2fr) repeat(3, minmax(100px, 1fr));
+  gap: 14px;
+}
+.acquisition-fields label {
+  display: grid;
+  gap: 8px;
+  font-size: 12px;
+  color: #54616c;
+}
+.acquisition-fields input,
+.acquisition-fields select {
+  min-width: 0;
+  width: 100%;
+}
+.acquisition-actions {
+  justify-content: space-between;
+  margin: 20px 0 12px;
+  font-size: 12px;
+}
+.acquisition-actions label {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.acquisition-actions input {
+  width: auto;
+}
+.acquisition-toolbar {
+  margin-bottom: 16px;
+}
+.acquisition-toolbar h3 {
+  font-size: 15px;
+  margin: 0;
+}
+.acquisition-toolbar h3 small {
+  font-size: 11px;
+  font-weight: 400;
+  color: #7f8a95;
+}
+.acquisition-toolbar select {
+  max-width: 100%;
+  margin-left: auto;
+  font-size: 12px;
+}
+.workflow-status {
+  font-size: 12px;
+  border-radius: 20px;
+  padding: 5px 10px;
+  background: #eef3fa;
+  color: #4676a2;
+}
+.workflow-status.paused {
+  background: #fff4e0;
+  color: #916419;
+}
+.workflow-status.completed {
+  background: #edf6ef;
+  color: #3e7453;
+}
+.acquisition-steps {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  padding: 0;
+  gap: 8px;
+}
+.acquisition-steps li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 13px;
+  background: #f7f8fa;
+  color: #929ba5;
+  font-size: 12px;
+  border-radius: 8px;
+}
+.acquisition-steps .current {
+  background: #edf3fc;
+  color: #356dc1;
+}
+.acquisition-steps .done {
+  background: #eff6f0;
+  color: #487655;
+}
+.workflow-message {
+  background: #f6f8fb;
+  border-left: 3px solid #7e96b4;
+  padding: 14px;
+  font-size: 13px;
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+}
+.acquisition-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin: 20px 0 28px;
+}
+.acquisition-metrics div {
+  padding: 16px;
+  border: 1px solid #e8ebee;
+  border-radius: 10px;
+}
+.acquisition-metrics strong {
+  display: block;
+  font-size: 27px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.acquisition-metrics span {
+  color: #83909d;
+  font-size: 12px;
+}
+.acquisition-empty {
+  padding: 22px 12px;
+  color: #7c8995;
+  font-size: 13px;
+  line-height: 1.9;
+}
+.workflow-leads {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.workflow-lead {
+  padding: 18px;
+  border: 1px solid #dce9df;
+  border-radius: 10px;
+  background: #fafdfb;
+  overflow-wrap: anywhere;
+}
+.workflow-lead > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+}
+.workflow-lead span,
+.workflow-lead small {
+  font-size: 11px;
+  color: #6a8173;
+}
+.workflow-lead p {
+  font-size: 14px;
+  line-height: 1.8;
+}
+.workflow-lead button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 15px;
+}
+.workflow-details {
+  border-top: 1px solid #eaedf0;
+  margin-top: 22px;
+  padding-top: 18px;
+}
+.workflow-details summary {
+  cursor: pointer;
+  font-size: 14px;
+  margin-bottom: 15px;
+}
+.workflow-note-list,
+.workflow-comment-list {
+  max-height: 440px;
+  overflow: auto;
+}
+.workflow-note-list article {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+  padding: 14px 0;
+  border-bottom: 1px solid #edf0f2;
+}
+.workflow-note-list article > div {
+  min-width: 0;
+}
+.workflow-note-list b {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.workflow-note-list small {
+  display: block;
+  margin-top: 8px;
+  font-size: 11px;
+  color: #8a959f;
+}
+.workflow-note-list p {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #6f7e8b;
+}
+.workflow-note-list button {
+  flex-shrink: 0;
+}
+.workflow-comment-list article {
+  padding: 16px 0;
+  border-bottom: 1px solid #edf0f2;
+  overflow-wrap: anywhere;
+}
+.workflow-comment-list article > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+.workflow-comment-list small {
+  color: #7c8b98;
+  font-size: 11px;
+  line-height: 1.8;
+}
+.workflow-comment-list p {
+  font-size: 14px;
+  line-height: 1.8;
+}
+.workflow-comment-list span {
+  margin-left: auto;
+  font-size: 11px;
+  color: #718578;
+}
+.workflow-logs {
+  list-style: none;
+  padding: 0;
+  font-size: 12px;
+  color: #697b8b;
+  line-height: 1.9;
+}
+.workflow-logs li {
+  display: flex;
+  gap: 14px;
+  margin-bottom: 8px;
+  overflow-wrap: anywhere;
+}
+.workflow-logs time {
+  white-space: nowrap;
+  color: #9aa7b2;
+}
+@media (max-width: 1100px) {
+  .acquisition-fields {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .acquisition-keyword {
+    grid-column: span 2;
+  }
+}
+@media (max-width: 760px) {
+  .acquisition-setup,
+  .acquisition-results {
+    padding: 16px;
+  }
+  .acquisition-fields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .acquisition-keyword {
+    grid-column: auto;
+  }
+  .acquisition-steps,
+  .acquisition-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .workflow-leads {
+    grid-template-columns: 1fr;
+  }
+  .acquisition-toolbar select {
+    width: 100%;
+  }
+  .workflow-note-list article {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}

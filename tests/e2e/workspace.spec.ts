@@ -122,3 +122,27 @@ test('mobile navigation, responsive boundaries and keyboard command input', asyn
   await page.keyboard.press('Control+k');
   await expect(page.locator('#agent-input')).toBeFocused();
 });
+
+test('One click executes search → comments → candidates on both platforms and survives reload', async ({
+  page,
+}) => {
+  await page.goto('/#acquisition');
+  await expect(page.getByRole('heading', { name: '从搜索，到值得复核的需求。' })).toBeVisible();
+  for (const platform of ['xiaohongshu', 'douyin']) {
+    await page.getByLabel('获客平台', { exact: true }).selectOption(platform);
+    await page.getByLabel('获客关键词').fill('沙发一键' + platform);
+    await page.getByLabel('每次搜索作品数').fill('4');
+    await page.getByLabel('最多采样作品数').fill('1');
+    await page.getByLabel('每篇评论上限').fill('12');
+    await page.getByRole('button', { name: '一键执行获客', exact: true }).click();
+    await expect(page.locator('.workflow-status')).toHaveText('已完成', { timeout: 20000 });
+    await expect(page.locator('.workflow-comment-list article')).toHaveCount(12);
+    await expect(page.locator('.workflow-lead').first()).toBeVisible();
+    await page.reload();
+    await expect(page.locator('.workflow-status')).toHaveText('已完成');
+    await expect(page.locator('.workflow-comment-list article')).toHaveCount(12);
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(391);
+  await page.screenshot({ path: screenshot('09-one-click-mobile'), fullPage: true });
+});

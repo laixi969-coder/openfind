@@ -55,3 +55,10 @@ test('Creator replies are not classified as prospective buyers', async () => {
   assert.equal(assessment.recommended, false);
   assert.match(assessment.reason, /作者/);
 });
+
+test('Real comment phrasing for link requests and short price questions has explicit evidence', () => {
+  for (const text of ['花瓶链接给一个', '礼貌问价', '这颗多少价啊', '什么价？'])
+    assert.equal(intentScore(text, new Date().toISOString()).recommended, true, text);
+  for (const text of ['不要链接了', '不用给我链接', '不问价'])
+    assert.equal(intentScore(text, new Date().toISOString()).recommended, false, text);
+});

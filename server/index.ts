@@ -5,6 +5,7 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import multer from 'multer';
 import { dataDir } from './store.ts';
+import { cachedJob } from './jobs-cache.ts';
 import { setTimeout as delay } from 'node:timers/promises';
 import JSZip from 'jszip';
 import { z } from 'zod';
@@ -23,7 +24,17 @@ import {
   minimumReadInterval,
   ProtectionError,
 } from './protection.ts';
-import type { Note, Comment, Lead, Draft, Job, Settings, Account } from '../shared/types.ts';
+import { createWorkflow, runWorkflow, recoverWorkflows, workflowRuns } from './workflows.ts';
+import type {
+  AcquisitionWorkflow,
+  Note,
+  Comment,
+  Lead,
+  Draft,
+  Job,
+  Settings,
+  Account,
+} from '../shared/types.ts';
 export const app = express();
 app.disable('x-powered-by');
 app.use(express.json({ limit: '30mb' }));
@@ -131,7 +142,8 @@ function log(j: Job, level: Job['logs'][number]['level'], message: string) {
   j.logs = j.logs.slice(-1000);
   put('jobs', j);
 }
-const active = () => [...running.keys()].length > 0;
+recoverWorkflows();
+const active = () => running.size > 0 || workflowRuns.size > 0;
 function currentLead(lead: Lead): Lead {
   const c = get<Comment>('comments', lead.commentId);
   const note = get<Note>('notes', lead.noteId);
@@ -150,35 +162,25 @@ function currentLead(lead: Lead): Lead {
     commentCreatedAt: c?.createdAt || lead.commentCreatedAt || '',
   };
 }
-async function runJob(job: Job, input: z.infer<typeof searchSchema>) {
+async function runJob(job: Job, input: z.infer<typeof searchSchema>, parentSignal?: AbortSignal) {
   const abort = new AbortController();
+  const cancel = () => abort.abort();
+  parentSignal?.addEventListener('abort', cancel, { once: true });
+  if (parentSignal?.aborted) abort.abort();
   running.set(job.id, abort);
   const started = Date.now();
   let cursor: string | null = null;
   let readId: string | null = null;
   const seen = new Set<string>();
   try {
+    abort.signal.throwIfAborted();
     log(
       job,
       'INFO',
       `${job.source === 'demo' ? '演示任务' : '真实任务'}开始：${job.type === 'search' ? input.keyword : job.noteId}`,
     );
     if (job.source === 'live' && !input.forceRefresh) {
-      const cached = all<Job>('jobs').find(
-        (j) =>
-          j.id !== job.id &&
-          j.source === 'live' &&
-          j.status === 'completed' &&
-          j.type === job.type &&
-          j.platform === job.platform &&
-          j.keyword === job.keyword &&
-          j.noteId === job.noteId &&
-          j.query?.sort === input.sort &&
-          j.query?.noteType === input.noteType &&
-          j.count >= input.limit &&
-          Date.now() - Date.parse(j.dataFetchedAt || j.finishedAt || '') < 300000 &&
-          j.resultIds.every((id) => get(job.type === 'search' ? 'notes' : 'comments', id)),
-      );
+      const cached = cachedJob(job, input);
       if (cached) {
         job.resultIds = cached.resultIds.slice(0, input.limit);
         job.count = job.resultIds.length;
@@ -197,6 +199,16 @@ async function runJob(job: Job, input: z.infer<typeof searchSchema>) {
       job.type === 'search'
         ? demoNotes(input.keyword, input.limit || 100)
         : demoComments(job.noteId!, input.limit || 60);
+    if (job.source === 'demo') {
+      sample =
+        job.type === 'search'
+          ? (sample as Note[]).map((n) => ({
+              ...n,
+              id: input.platform === 'douyin' ? 'demo-dy:' + n.id : n.id,
+              platform: input.platform,
+            }))
+          : (sample as Comment[]).map((c) => ({ ...c, platform: input.platform }));
+    }
     if (job.type === 'search') {
       sample = (sample as Note[]).filter(
         (n) => input.noteType === 'all' || n.type === input.noteType,
@@ -321,6 +333,7 @@ async function runJob(job: Job, input: z.infer<typeof searchSchema>) {
     }
     put('jobs', job);
     running.delete(job.id);
+    parentSignal?.removeEventListener('abort', cancel);
   }
 }
 app.get('/api/health', (_req, res) => res.json({ ok: true, name: 'openfind' }));
@@ -332,9 +345,60 @@ app.get('/api/state', (_req, res) =>
     leads: all<Lead>('leads').map(currentLead),
     drafts: all<Draft>('drafts'),
     jobs: all<Job>('jobs'),
+    workflows: all<AcquisitionWorkflow>('workflows'),
     settings: settings(),
   }),
 );
+const acquisitionSchema = z.object({
+  keyword: z.string().trim().min(1).max(100),
+  platform: z.enum(['xiaohongshu', 'douyin']),
+  mode: z.enum(['demo', 'live']),
+  searchLimit: z.number().int().min(1).max(40).default(20),
+  maxNotes: z.number().int().min(1).max(5).default(3),
+  commentLimit: z.number().int().min(1).max(50).default(20),
+  supplement: z.boolean().default(true),
+});
+app.post('/api/workflows', (req, res) => {
+  const input = acquisitionSchema.parse(req.body);
+  if (active() || publishing.size) {
+    res.status(409).json({ error: '已有任务运行，请先暂停或等待完成' });
+    return;
+  }
+  if (intentScore('', '', input.keyword).stage === 'restricted') {
+    res
+      .status(400)
+      .json({ error: '此关键词涉及敏感主题，请使用发现作品进行内容研究，不执行个人营销线索流程' });
+    return;
+  }
+  const w = createWorkflow(input);
+  void runWorkflow(w, runJob);
+  res.status(201).json(w);
+});
+app.post('/api/workflows/:id/:action', (req, res) => {
+  const w = get<AcquisitionWorkflow>('workflows', String(req.params.id));
+  if (!w) {
+    res.status(404).json({ error: '流程不存在' });
+    return;
+  }
+  if (req.params.action === 'pause') {
+    const controller = workflowRuns.get(w.id);
+    if (!controller) {
+      res.status(409).json({ error: '流程已结束或暂停' });
+      return;
+    }
+    controller.abort();
+  } else if (req.params.action === 'resume') {
+    if (w.status !== 'paused' || active() || publishing.size) {
+      res.status(409).json({ error: '请等待当前任务结束；只有暂停的流程可以继续' });
+      return;
+    }
+    void runWorkflow(w, runJob);
+  } else {
+    res.status(404).json({ error: '未知操作' });
+    return;
+  }
+  res.json(w);
+});
 app.post('/api/intent', (req, res) => {
   const { text } = z.object({ text: z.string().trim().min(1).max(2000) }).parse(req.body);
   res.json(parseIntent(text));
@@ -378,6 +442,8 @@ app.post('/api/jobs/:id/stop', (req, res) => {
     res.status(409).json({ error: '任务已结束' });
     return;
   }
+  for (const w of all<AcquisitionWorkflow>('workflows'))
+    if (w.currentJobId === req.params.id) workflowRuns.get(w.id)?.abort();
   controller.abort();
   res.json({ ok: true });
 });

@@ -85,19 +85,19 @@ export function intentScore(
       body + '\n' + context,
     );
   const resolved =
-    /(?:已经|刚刚|刚|早就|已)(?:买到|买了|买好|购买|下单|预约|解决|找到|选好)|买好了|问题解决了|不用了|不需要了|不买了|不想买|不打算买|已成交/.exec(
+    /(?:已经|刚刚|刚|早就|已)(?:买到|买了|买好|购买|下单|预约|解决|找到|选好)|买好了|问题解决了|不用了|不需要了|不买了|不想买|不打算买|不要链接|不用给.{0,2}链接|不问价|已成交/.exec(
       body,
     );
   const seller = /加我|私我|看我主页|看主页|厂家直销|我这有|我家有|专业代办/.exec(body);
   const purchasePath =
-    /(?:有|给|发).{0,4}链接(?:吗|么|[?？])|(?:求|蹲)个?链接|(?:在)?哪(?:里|儿)?买(?:的)?|怎么预约|如何预约|怎么买|想订|想下单|求联系方式|怎么联系/.exec(
+    /链接.{0,3}(?:给|发)(?:我|一个|个|一下)|(?:有|给|发).{0,4}链接(?:吗|么|[?？])|(?:求|蹲)个?链接|(?:在)?哪(?:里|儿)?买(?:的)?|怎么预约|如何预约|怎么买|想订|想下单|求联系方式|怎么联系/.exec(
       body,
     );
   const priceQuestion = /\d+(?:\.\d+)?\s*(?:w|万|元|块).{0,8}(?:吗|么|[?？])/i.exec(body);
   const demand =
     purchasePath ||
     priceQuestion ||
-    /多少钱|花多少|花了多少|求报价|报价多少|什么价格|价格多少|预算|费用多少|怎么收费|想买|想做|想订|想了解|准备买|准备装修|求推荐|需要一个|需要一套|怎么预约|求链接|怎么买|哪里买|哪里有卖|还没买/.exec(
+    /多少钱|花多少|花了多少|求报价|报价多少|什么价|多少价|问价|价格多少|预算|费用多少|怎么收费|想买|想做|想订|想了解|准备买|准备装修|求推荐|需要一个|需要一套|怎么预约|求链接|怎么买|哪里买|哪里有卖|还没买/.exec(
       body,
     );
   const action = purchasePath;
@@ -128,7 +128,7 @@ export function intentScore(
           ? 'demand'
           : 'considering';
   return {
-    version: 'intent-rules-2.1',
+    version: 'intent-rules-2.2',
     assessedAt: new Date(now).toISOString(),
     score,
     stage,
@@ -213,6 +213,12 @@ export function acquisitionPriority(note: Note, comments: Comment[], now = Date.
   const age =
     Number.isFinite(time) && time <= now + 300000 ? Math.max(0, (now - time) / 86400000) : null;
   const freshness = age === null ? 0 : age <= 7 ? 10 : age <= 30 ? 5 : 0;
+  if (note.commentCountKnown === false)
+    return {
+      tier: 1,
+      weight: freshness + 3,
+      reason: '搜索页未提供评论数，需小样本采集核实；不等于零评论',
+    };
   if (note.comments > 0)
     return {
       tier: 1,

@@ -348,3 +348,37 @@ test('live adapter handles pagination, dedup, throttling, account preflight and 
     await new Promise<void>((r) => ms.close(() => r()));
   }
 });
+
+test('One-click API runs both platforms with isolated data, rejects duplicate starts and persists results', async () => {
+  for (const platform of ['xiaohongshu', 'douyin'] as const) {
+    const r = await json<import('../shared/types.ts').AcquisitionWorkflow>('/api/workflows', {
+      keyword: '流程沙发' + platform,
+      platform,
+      mode: 'demo',
+      searchLimit: 4,
+      maxNotes: 1,
+      commentLimit: 12,
+      supplement: false,
+    });
+    assert.equal((await request('/api/workflows', { ...r.input })).status, 409);
+    assert.equal((await request('/api/jobs', search)).status, 409);
+    let done = r;
+    for (let i = 0; i < 100; i++) {
+      done = (await state()).workflows.find((w) => w.id === r.id)!;
+      if (done.status !== 'running') break;
+      await new Promise((r) => setTimeout(r, 80));
+    }
+    assert.equal(done.status, 'completed');
+    assert.equal(done.commentIds.length, 12);
+    assert.ok(done.leadIds.length > 0);
+    const s = await state();
+    assert.ok(done.noteIds.every((id) => s.notes.find((n) => n.id === id)?.platform === platform));
+    assert.ok(done.leadIds.every((id) => s.leads.find((l) => l.id === id)?.platform === platform));
+    assert.equal((await request('/api/workflows/' + done.id + '/resume', {})).status, 409);
+  }
+  assert.equal(
+    (await request('/api/workflows', { keyword: 'HPV治疗', platform: 'douyin', mode: 'demo' }))
+      .status,
+    400,
+  );
+});

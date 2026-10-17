@@ -109,6 +109,7 @@ export function xhsNotes(payload: unknown): Note[] {
         cover,
         likes: count(info.liked_count || info.likedCount),
         comments: count(info.comment_count || info.commentCount),
+        commentCountKnown: info.comment_count != null || info.commentCount != null,
         saves: count(info.collected_count || info.collectedCount),
         publishedAt: date(n.time),
         tags: (n.tag_list || []).map((t: R) => String(t.name)),
@@ -204,4 +205,17 @@ export function responseMore(platform: Platform, payload: unknown): boolean | un
   const v = d.has_more ?? d.hasMore;
   if (v === undefined) return undefined;
   return !!v;
+}
+
+/** XHS v2 places the active sort in filters while the legacy top-level sort stays general. */
+export function xhsRequestSort(body: unknown): string | null {
+  const data = obj(body);
+  if (Array.isArray(data.filters)) {
+    const selected = data.filters.find((f: any) => f?.type === 'sort_type');
+    if (selected)
+      return Array.isArray(selected.tags) && typeof selected.tags[0] === 'string'
+        ? selected.tags[0]
+        : null;
+  }
+  return typeof data.sort === 'string' ? data.sort : null;
 }

@@ -7,6 +7,7 @@ import {
   count,
   responseMore,
   parsePlatformJSON,
+  xhsRequestSort,
 } from '../server/platforms/model.ts';
 test('Platform numeric IDs remain exact beyond JavaScript integer precision', () => {
   const payload = parsePlatformJSON(
@@ -181,4 +182,27 @@ test('Douyin latest collection rejects late general responses and wrong sort req
   assert.equal(matchesDouyinSort(filtered, 'general'), false);
   assert.equal(matchesDouyinSort(base + '?sort_type=1', 'popular'), true);
   assert.equal(matchesDouyinSort(base + '?filter_selected=broken', 'latest'), false);
+});
+
+test('XHS v2 active filter overrides the stale top-level general sort', () => {
+  assert.equal(
+    xhsRequestSort({
+      sort: 'general',
+      filters: [{ type: 'sort_type', tags: ['time_descending'] }],
+    }),
+    'time_descending',
+  );
+  assert.equal(
+    xhsRequestSort({
+      sort: 'general',
+      filters: [{ type: 'sort_type', tags: ['popularity_descending'] }],
+    }),
+    'popularity_descending',
+  );
+  assert.equal(xhsRequestSort({ sort: 'time_descending' }), 'time_descending');
+  assert.equal(
+    xhsRequestSort({ sort: 'general', filters: [{ type: 'sort_type', tags: [] }] }),
+    null,
+  );
+  assert.equal(xhsRequestSort(null), null);
 });

@@ -21,6 +21,7 @@ import {
   parsePlatformJSON,
   parseDouyinSearch,
   matchesDouyinSort,
+  xhsRequestSort,
 } from './model.ts';
 export const platformNames = { xiaohongshu: '小红书', douyin: '抖音' };
 const homes: Record<Platform, string> = {
@@ -310,6 +311,24 @@ function attachRead(run: ReadRun) {
       !matchesDouyinSort(url, run.sort || 'general')
     )
       return;
+    let xhsSort: string | null = null;
+    let xhsFilters: string | null = null;
+    if (run.platform === 'xiaohongshu' && run.kind === 'search') {
+      try {
+        const body = response.request().postDataJSON();
+        xhsSort = xhsRequestSort(body);
+        xhsFilters = JSON.stringify(body?.filters || []);
+      } catch {
+        return;
+      }
+      const expected =
+        run.sort === 'latest'
+          ? 'time_descending'
+          : run.sort === 'popular'
+            ? 'popularity_descending'
+            : 'general';
+      if (xhsSort !== expected) return;
+    }
     run.inFlight = (run.inFlight || 0) + 1;
     try {
       if ([403, 429].includes(response.status())) {
@@ -323,8 +342,8 @@ function attachRead(run: ReadRun) {
       if (run.minRequestTime && response.request().timing().startTime < run.minRequestTime) return;
       run.diagnostic = {
         path: new URL(url).pathname,
-        sortType: new URL(url).searchParams.get('sort_type'),
-        filterSelected: new URL(url).searchParams.get('filter_selected'),
+        sortType: xhsSort || new URL(url).searchParams.get('sort_type'),
+        filterSelected: xhsFilters || new URL(url).searchParams.get('filter_selected'),
         keys: Object.keys(payload),
         status: payload.status_code,
         dataType: Array.isArray(payload.data) ? 'array' : typeof payload.data,
@@ -552,7 +571,7 @@ export async function browserSearch(
   if (input.sort === 'latest') items.sort((a, b) => b.publishedAt.localeCompare(a.publishedAt));
   return { ...result, items };
 }
-async function applyFilters(
+export async function applyFilters(
   page: Page,
   platform: Platform,
   input: SearchInput,
@@ -576,7 +595,24 @@ async function applyFilters(
       const sort = page.getByText(sortText, { exact: true }).first();
       if (await sort.isVisible().catch(() => false)) {
         beforeChange();
-        await sort.click();
+        try {
+          await sort.click({ timeout: 3000 });
+        } catch (error) {
+          if (platform !== 'xiaohongshu') throw error;
+          // XHS's hover panel can close as Playwright moves the pointer from its
+          // trigger to the option. Reopen it and activate the visible DOM option;
+          // the site's own click handler still performs the search and sorting.
+          await assertNoChallenge(page);
+          await filter.hover();
+          await delay(500);
+          const visible = page
+            .getByText(sortText, { exact: true })
+            .and(page.locator(':visible'))
+            .first();
+          await visible.waitFor({ state: 'visible', timeout: 3000 });
+          beforeChange();
+          await visible.evaluate((el) => (el as HTMLElement).click());
+        }
       } else throw new Error('当前平台页面的排序控件不可用，未悄悄改用综合排序');
     }
     if (input.noteType !== 'all') {
