@@ -1,0 +1,15 @@
+node_modules/
+dist/
+data/
+.env
+playwright-report/
+test-results/
+.DS_Store
+*.tsbuildinfo
+output/
+analysis/frames/
+analysis/sheets/
+analysis/screenshots/
+analysis/ocr.txt
+.env.*
+*.log
