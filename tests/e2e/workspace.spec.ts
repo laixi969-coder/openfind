@@ -134,7 +134,14 @@ test('One click executes search → comments → candidates on both platforms an
     await page.getByLabel('每次搜索作品数').fill('4');
     await page.getByLabel('最多采样作品数').fill('1');
     await page.getByLabel('每篇评论上限').fill('12');
+    const started = page.waitForResponse(
+      (r) => r.url().endsWith('/api/workflows') && r.request().method() === 'POST',
+    );
     await page.getByRole('button', { name: '一键执行获客', exact: true }).click();
+    const created = await started;
+    expect(created.status()).toBe(201);
+    const workflow = await created.json();
+    await expect(page).toHaveURL(new RegExp(workflow.id));
     await expect(page.locator('.workflow-status')).toHaveText('已完成', { timeout: 20000 });
     await expect(page.locator('.workflow-comment-list article')).toHaveCount(12);
     await expect(page.locator('.workflow-lead').first()).toBeVisible();
@@ -145,4 +152,24 @@ test('One click executes search → comments → candidates on both platforms an
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(391);
   await page.screenshot({ path: screenshot('09-one-click-mobile'), fullPage: true });
+});
+
+test('collection budgets can be edited independently and survive reload', async ({ page }) => {
+  await page.goto('/#settings');
+  await expect(page.getByLabel('抖音搜索每日批次数')).toHaveValue('100');
+  await page.getByLabel('抖音搜索每日批次数').fill('125');
+  await page.getByLabel('抖音评论采集间隔秒数').fill('22');
+  const saved = page.waitForResponse(
+    (r) => r.url().endsWith('/api/protection/douyin') && r.request().method() === 'PUT',
+  );
+  await page.getByRole('button', { name: '保存抖音采集配置' }).click();
+  const response = await saved;
+  expect(response.status(), await response.text()).toBe(200);
+  expect((await response.json()).policy.search.dailyLimit).toBe(125);
+  await expect(page.getByLabel('抖音采集额度')).toContainText('剩余 125 / 125 批');
+  await page.reload();
+  await expect(page.getByLabel('抖音搜索每日批次数')).toHaveValue('125');
+  await expect(page.getByLabel('抖音评论采集间隔秒数')).toHaveValue('22');
+  await expect(page.getByLabel('小红书搜索每日批次数')).toHaveValue('100');
+  await expect(page.getByLabel('抖音采集额度')).toContainText('每日 UTC 00:00 重置');
 });

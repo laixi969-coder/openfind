@@ -43,3 +43,65 @@ test('Verification pauses immediately, repeated failures pause and explicit resu
   assert.equal(protectionStatus('douyin').paused, false);
   assert.deepEqual(protectionStatus('douyin').counts, counts);
 });
+
+test('Per-platform policy persists without resetting usage or clearing verification', async () => {
+  const { saveCollectionPolicy, collectionPolicy, reservePlatformAction, protectionView } =
+    await import('../server/protection.ts');
+  assert.equal(collectionPolicy('douyin').search.dailyLimit, 100);
+  reservePlatformAction('xiaohongshu', 'search');
+  recordPlatformFailure('xiaohongshu', 'captcha');
+  const policy = {
+    search: { dailyLimit: 120, intervalMs: 30000 },
+    comments: { dailyLimit: 75, intervalMs: 5000 },
+  };
+  saveCollectionPolicy('xiaohongshu', policy);
+  assert.deepEqual(collectionPolicy('xiaohongshu'), policy);
+  assert.equal(collectionPolicy('douyin').search.dailyLimit, 100);
+  let view = protectionView('xiaohongshu');
+  assert.equal(view.counts.search, 1);
+  assert.equal(view.budgets.search.remaining, 119);
+  assert.equal(view.budgets.search.availableAt, null);
+  assert.throws(() => reservePlatformAction('xiaohongshu', 'search'), /暂停/);
+  resumePlatform('xiaohongshu');
+  const state = protectionStatus('xiaohongshu');
+  assert.match(evaluateBudget(state, 'search', state.lastReadAt! + 5000), /25 秒/);
+  assert.equal(evaluateBudget(state, 'comments', state.lastReadAt! + 5000), '');
+  saveCollectionPolicy('xiaohongshu', { ...policy, search: { ...policy.search, dailyLimit: 1 } });
+  view = protectionView('xiaohongshu');
+  assert.equal(view.budgets.search.remaining, 0);
+  assert.equal(view.budgets.search.availableAt, Math.max(view.resetAt, state.lastReadAt! + 30000));
+  assert.equal(new Date(view.resetAt).getUTCHours(), 0);
+  assert.match(evaluateBudget(protectionStatus('xiaohongshu'), 'search'), /上限 1/);
+  for (const value of [0, -1, 1.5, 10001])
+    assert.throws(() =>
+      saveCollectionPolicy('xiaohongshu', {
+        ...policy,
+        search: { ...policy.search, dailyLimit: value },
+      }),
+    );
+  for (const value of [0, 999, 3600001])
+    assert.throws(() =>
+      saveCollectionPolicy('xiaohongshu', {
+        ...policy,
+        comments: { ...policy.comments, intervalMs: value },
+      }),
+    );
+});
+test('UTC rollover resets counts but retains cooldown and platform pauses', async () => {
+  const { configSet } = await import('../server/store.ts');
+  configSet(
+    'protection:douyin',
+    JSON.stringify({
+      ...freshProtection(0),
+      counts: { search: 100, comments: 100, publish: 0, prepare: 0 },
+      lastReadAt: Date.now(),
+      paused: true,
+      reason: '验证',
+      failures: 1,
+    }),
+  );
+  const state = protectionStatus('douyin');
+  assert.equal(state.counts.search, 0);
+  assert.equal(state.paused, true);
+  assert.ok(state.lastReadAt);
+});

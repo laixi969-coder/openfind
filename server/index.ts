@@ -20,8 +20,9 @@ import {
   recordPlatformSuccess,
   protectionStatus,
   resumePlatform,
-  operationLimits,
-  minimumReadInterval,
+  protectionView,
+  saveCollectionPolicy,
+  readInterval,
   ProtectionError,
 } from './protection.ts';
 import { createWorkflow, runWorkflow, recoverWorkflows, workflowRuns } from './workflows.ts';
@@ -226,9 +227,13 @@ async function runJob(job: Job, input: z.infer<typeof searchSchema>, parentSigna
         cursor = (page + 1) * 12 < sample.length ? String(page + 1) : null;
       } else {
         if (page)
-          await delay(Math.max(minimumReadInterval, input.interval), undefined, {
-            signal: abort.signal,
-          });
+          await delay(
+            Math.max(readInterval(protectionStatus(input.platform), job.type), input.interval),
+            undefined,
+            {
+              signal: abort.signal,
+            },
+          );
         reservePlatformAction(input.platform, job.type);
         const result: {
           items: (Omit<Note, 'source'> | Omit<Comment, 'source'>)[];
@@ -873,12 +878,19 @@ const platformEnum = z.enum(['xiaohongshu', 'douyin']);
 app.get('/api/protection', (_req, res) =>
   res.json({
     platforms: Object.fromEntries(
-      ['xiaohongshu', 'douyin'].map((p) => [p, protectionStatus(platformEnum.parse(p))]),
+      ['xiaohongshu', 'douyin'].map((p) => [p, protectionView(platformEnum.parse(p))]),
     ),
-    limits: operationLimits,
-    minimumReadInterval,
   }),
 );
+app.put('/api/protection/:platform', (req, res) => {
+  const platform = platformEnum.parse(req.params.platform);
+  if (active() || publishing.size) {
+    res.status(409).json({ error: '请先暂停正在执行的任务，再修改采集额度与间隔' });
+    return;
+  }
+  saveCollectionPolicy(platform, req.body);
+  res.json(protectionView(platform));
+});
 app.post('/api/platforms/:platform/resume', async (req, res) => {
   const platform = platformEnum.parse(req.params.platform);
   if (settings().connectionType === 'browser') {

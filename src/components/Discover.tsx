@@ -59,7 +59,7 @@ export function Discover() {
     [noteType, setNoteType] = useState<SearchInput['noteType']>(
       initialJob?.query?.noteType || 'all',
     ),
-    [interval, setInterval] = useState(data.settings.mode === 'live' ? 15000 : 1000),
+    [interval, setInterval] = useState(data.settings.mode === 'live' ? 250 : 1000),
     [prompt, setPrompt] = useState(''),
     [planning, setPlanning] = useState(false),
     [busy, setBusy] = useState(false),
@@ -429,7 +429,7 @@ export function Discover() {
             </div>
             <div className="field-hint">
               {data.settings.mode === 'live'
-                ? '真实采集每次1–100条，批次至少间隔15秒。'
+                ? '真实采集每次1–100条，批次间隔遵循连接设置，可在下方延长。'
                 : '0 表示持续翻页，直到数据源返回结束。'}
             </div>
             <div className="field-row">
@@ -458,7 +458,8 @@ export function Discover() {
                 >
                   {data.settings.mode === 'live' && (
                     <>
-                      <option value="15000">15 秒</option>
+                      <option value="250">遵循平台采集配置</option>
+                      <option value="15000">至少 15 秒</option>
                       <option value="30000">30 秒</option>
                       <option value="60000">60 秒</option>
                     </>

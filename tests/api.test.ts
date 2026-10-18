@@ -382,3 +382,36 @@ test('One-click API runs both platforms with isolated data, rejects duplicate st
     400,
   );
 });
+
+test('Collection configuration API validates input and returns budgets for each platform', async () => {
+  const policy = {
+    search: { dailyLimit: 150, intervalMs: 20000 },
+    comments: { dailyLimit: 200, intervalMs: 30000 },
+  };
+  assert.equal(
+    (await request('/api/protection/douyin', { ...policy, paused: false }, 'PUT')).status,
+    400,
+  );
+  assert.equal(
+    (
+      await request(
+        '/api/protection/douyin',
+        { ...policy, search: { dailyLimit: 0, intervalMs: 20000 } },
+        'PUT',
+      )
+    ).status,
+    400,
+  );
+  const result = await json<import('../shared/types.ts').ProtectionView>(
+    '/api/protection/douyin',
+    policy,
+    'PUT',
+  );
+  assert.deepEqual(result.policy, policy);
+  assert.equal(result.budgets.search.remaining, 150);
+  const status = await json<{
+    platforms: Record<string, import('../shared/types.ts').ProtectionView>;
+  }>('/api/protection');
+  assert.equal(status.platforms.xiaohongshu.policy.search.dailyLimit, 100);
+  assert.deepEqual(status.platforms.douyin.policy, policy);
+});

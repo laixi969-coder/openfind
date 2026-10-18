@@ -4536,3 +4536,43 @@ blockquote {
     align-items: flex-start;
   }
 }
+
+.collection-budget {
+  padding: 18px;
+  margin: 14px 0;
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 12px;
+  background: #fafbf9;
+}
+.collection-budget h3 {
+  margin: 0 0 10px;
+  font-size: 14px;
+}
+.budget-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 16px;
+}
+.budget-grid p {
+  font-size: 12px;
+  line-height: 1.6;
+  margin: 5px 0;
+}
+.budget-grid label {
+  font-size: 12px;
+}
+.budget-grid input {
+  width: 100%;
+  margin-top: 5px;
+}
+.collection-budget {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.budget-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
+}
+.budget-grid > div,
+.budget-grid label {
+  min-width: 0;
+}

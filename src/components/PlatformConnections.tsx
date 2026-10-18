@@ -1,3 +1,4 @@
+import { CollectionBudget } from './CollectionBudget';
 import { useEffect, useState } from 'react';
 import {
   Plug,
@@ -126,8 +127,7 @@ export function PlatformConnections() {
                       ? `操作已暂停：${protection[p].reason}`
                       : '操作保护已启用'}
                     <br />
-                    今日搜索 {protection[p].counts.search}/10 批 · 评论{' '}
-                    {protection[p].counts.comments}/40 批 · 发布 {protection[p].counts.publish}/5 次
+                    今日发布 {protection[p].counts.publish}/5 次
                   </p>
                   {protection[p].paused && (
                     <button
@@ -147,6 +147,7 @@ export function PlatformConnections() {
                   )}
                 </div>
               )}
+              <CollectionBudget platform={p} editable />
               <label className="platform-network">
                 <span>网络</span>
                 <select
@@ -202,7 +203,7 @@ export function PlatformConnections() {
         })}
       </div>
       <div className="connection-footnote">
-        真实采集每次最多100条，批次至少间隔15秒；验证、限流和连续失败会暂停。上述数值为本地保守限制，不是平台安全额度，也不能保证账号不受限制。不会自动切换账号重试或批量私信。
+        真实采集每次最多100条，批次间隔遵循上方配置；验证、限流和连续失败会暂停。上述数值为本地保守限制，不是平台安全额度，也不能保证账号不受限制。不会自动切换账号重试或批量私信。
         <br />
         长期运营优先申请官方权限：
         <a

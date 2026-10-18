@@ -12,7 +12,7 @@ import type {
 import { all, get, put } from './store.ts';
 import { cachedJob } from './jobs-cache.ts';
 import { acquisitionPriority, assessComment, intentScore, toLead } from './domain.ts';
-import { evaluateBudget, minimumReadInterval, protectionStatus } from './protection.ts';
+import { evaluateBudget, readInterval, protectionStatus } from './protection.ts';
 
 export const workflowRuns = new Map<string, AbortController>();
 export type JobExecutor = (
@@ -129,7 +129,7 @@ async function waitForPlatform(
   // Evaluate non-timing guards first. Waiting never clears a platform pause or a quota.
   const error = evaluateBudget({ ...state, lastReadAt: undefined }, action);
   if (error) throw new Error(error);
-  const ms = Math.max(0, minimumReadInterval - (Date.now() - (state.lastReadAt || 0)));
+  const ms = Math.max(0, readInterval(state, action) - (Date.now() - (state.lastReadAt || 0)));
   if (ms) {
     saveWorkflow(
       w,
@@ -157,7 +157,7 @@ export async function runWorkflow(w: AcquisitionWorkflow, execute: JobExecutor) 
       noteType: 'all' as const,
       mode: w.input.mode,
       platform: w.input.platform,
-      interval: minimumReadInterval,
+      interval: 250,
       forceRefresh: false,
     };
     const j: Job = {

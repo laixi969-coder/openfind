@@ -147,7 +147,7 @@ test('Real quota or verification pause blocks dispatch without clearing protecti
         ...freshProtection(),
         paused,
         reason: '本人验证',
-        counts: { search: 10, comments: 0, publish: 0, prepare: 0 },
+        counts: { search: 100, comments: 0, publish: 0, prepare: 0 },
       }),
     );
     await runWorkflow(w, async () => assert.fail('blocked platform must not be contacted'));
@@ -238,7 +238,7 @@ test('Exhausted network quota still permits eligible local cache without extendi
     'protection:douyin',
     JSON.stringify({
       ...freshProtection(),
-      counts: { search: 10, comments: 0, publish: 0, prepare: 0 },
+      counts: { search: 100, comments: 0, publish: 0, prepare: 0 },
     }),
   );
   const w = createWorkflow({
@@ -258,6 +258,6 @@ test('Exhausted network quota still permits eligible local cache without extendi
     put('jobs', j);
   });
   assert.equal(w.status, 'completed');
-  assert.equal(protectionStatus('douyin').counts.search, 10);
+  assert.equal(protectionStatus('douyin').counts.search, 100);
   assert.equal(get<any>('jobs', w.searchJobIds[0]).dataFetchedAt, timestamp);
 });

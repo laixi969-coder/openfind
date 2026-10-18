@@ -30,7 +30,7 @@ export function Comments() {
   const job = jobs.find((j) => j.noteId === commentNoteId) || jobs[0];
   const [noteId, setNoteId] = useState(commentNoteId || job?.noteId || data.notes[0]?.id || ''),
     [limit, setLimit] = useState(60),
-    [interval, setInterval] = useState(data.settings.mode === 'live' ? 15000 : 1000),
+    [interval, setInterval] = useState(data.settings.mode === 'live' ? 250 : 1000),
     [query, setQuery] = useState(''),
     [days, setDays] = useState(data.settings.mode === 'live' ? '7' : 'all'),
     [kind, setKind] = useState(data.settings.mode === 'live' ? 'intent' : 'all'),
@@ -179,7 +179,8 @@ export function Comments() {
               >
                 {data.settings.mode === 'live' ? (
                   <>
-                    <option value="15000">15 秒</option>
+                    <option value="250">遵循平台采集配置</option>
+                    <option value="15000">至少 15 秒</option>
                     <option value="30000">30 秒</option>
                     <option value="60000">60 秒</option>
                   </>

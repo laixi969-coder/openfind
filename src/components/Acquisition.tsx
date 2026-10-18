@@ -1,3 +1,4 @@
+import { CollectionBudget } from './CollectionBudget';
 import { useState } from 'react';
 import { Play, Pause, ArrowRight, Download, Workflow, CheckCircle2, Clock } from 'lucide-react';
 import type { AcquisitionWorkflow, Platform } from '../../shared/types';
@@ -78,6 +79,7 @@ export function Acquisition() {
         title="从搜索，到值得复核的需求。"
         description="选好平台和关键词，自动搜索、挑选作品、采集评论并保存候选。结果与判断依据留在同一页。"
       />
+      <CollectionBudget platform={platform} />
       <section className="acquisition-setup" aria-label="一键获客设置">
         <div className="acquisition-intro">
           <Workflow size={22} />

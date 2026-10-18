@@ -193,3 +193,16 @@ export interface AcquisitionWorkflow {
   updatedAt: string;
   finishedAt?: string;
 }
+
+export type CollectionPolicy = Record<
+  'search' | 'comments',
+  { dailyLimit: number; intervalMs: number }
+>;
+export interface ProtectionView {
+  paused: boolean;
+  reason: string;
+  counts: Record<'search' | 'comments' | 'publish' | 'prepare', number>;
+  policy: CollectionPolicy;
+  resetAt: number;
+  budgets: Record<'search' | 'comments', { remaining: number; availableAt: number | null }>;
+}
