@@ -1,3 +1,4 @@
+import { SalesWorkbench, SalesMetrics } from './SalesWorkbench';
 import { AssessmentDetails } from './AssessmentDetails';
 import { useState, useMemo } from 'react';
 import {
@@ -554,7 +555,8 @@ export function Leads() {
     [focused, setFocused] = useState<Lead | null>(null),
     [memo, setMemo] = useState(''),
     [outreach, setOutreach] = useState(''),
-    [saving, setSaving] = useState(false);
+    [saving, setSaving] = useState(false),
+    [salesRevision, setSalesRevision] = useState(0);
   const leads = data.leads
     .filter(
       (l) =>
@@ -562,7 +564,12 @@ export function Leads() {
         [l.name, l.region, l.content, l.memo].join(' ').includes(query),
     )
     .sort((a, b) => b.score - a.score);
-  const labels = { new: '待跟进', contacted: '已联系', qualified: '已转化', archived: '已归档' };
+  const labels = {
+    new: '待跟进',
+    contacted: '已联系',
+    qualified: '需求已确认',
+    archived: '已归档',
+  };
   async function update(id: string, patch: Partial<Lead>) {
     setSaving(true);
     try {
@@ -598,7 +605,7 @@ export function Leads() {
           ['全部线索', data.leads.length],
           ['高意向客户', data.leads.filter((l) => l.score >= 50).length],
           ['待跟进', data.leads.filter((l) => l.status === 'new').length],
-          ['已转化', data.leads.filter((l) => l.status === 'qualified').length],
+          ['需求已确认', data.leads.filter((l) => l.status === 'qualified').length],
         ].map(([label, n]) => (
           <div key={label}>
             <span>{label}</span>
@@ -606,6 +613,13 @@ export function Leads() {
           </div>
         ))}
       </div>
+      <SalesMetrics
+        revision={salesRevision}
+        onOpen={(id) => {
+          const lead = data.leads.find((l) => l.id === id);
+          if (lead) open(lead);
+        }}
+      />
       <section className="panel results-box">
         <div className="results-heading">
           <div>
@@ -754,6 +768,12 @@ export function Leads() {
                 </p>
               ))}
             </div>
+            <SalesWorkbench
+              key={focused.id}
+              lead={focused}
+              note={data.notes.find((n) => n.id === focused.noteId)}
+              onChange={() => setSalesRevision((n) => n + 1)}
+            />
             <label className="field-label" htmlFor="memo">
               跟进备注
             </label>

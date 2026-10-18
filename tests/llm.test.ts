@@ -25,6 +25,7 @@ const server = createServer(async (req, res) => {
   const body = text ? JSON.parse(text) : undefined;
   requests.push({ url: req.url!, body, authorization: req.headers.authorization });
   res.setHeader('Content-Type', 'application/json');
+  if (mode === 'slow') await new Promise((r) => setTimeout(r, 80));
   if (mode === 'redirect') {
     res.writeHead(302, { Location: 'http://127.0.0.1:1/leak' });
     res.end();
@@ -268,5 +269,33 @@ test('A creator purchase cannot establish that the reader has bought; raw model 
   assert.equal(reviewed?.verdict, 'interest');
   assert.match(reviewed!.validationWarning!, /未见本人/);
   assert.equal(get<any>('semanticReviews', root.id).verdict, 'resolved');
+  mode = 'ok';
+});
+
+test('Timeout defaults are 120/900 seconds, configurable, validated and preserved for old clients', () => {
+  const p = { enabled: false, baseUrl: base, model: 'chat-old', maxComments: 100 };
+  assert.equal(llmSettings().requestTimeoutSeconds, 120);
+  assert.equal(llmSettings().reviewTimeoutSeconds, 900);
+  saveLlmSettings({ ...p, requestTimeoutSeconds: 180, reviewTimeoutSeconds: 1200 });
+  saveLlmSettings(p);
+  assert.equal(llmSettings().requestTimeoutSeconds, 180);
+  assert.equal(llmSettings().reviewTimeoutSeconds, 1200);
+  assert.throws(() => saveLlmSettings({ ...p, requestTimeoutSeconds: 301 }));
+  assert.throws(() =>
+    saveLlmSettings({ ...p, requestTimeoutSeconds: 120, reviewTimeoutSeconds: 60 }),
+  );
+  assert.equal(llmSettings().requestTimeoutSeconds, 180);
+});
+
+test('The configured request deadline is applied to the real HTTP request', async (t) => {
+  mode = 'slow';
+  const original = AbortSignal.timeout;
+  const deadlines: number[] = [];
+  t.mock.method(AbortSignal, 'timeout', (ms: number) => {
+    deadlines.push(ms);
+    return original(5);
+  });
+  await assert.rejects(testLlm(), /180秒/);
+  assert.deepEqual(deadlines, [180000]);
   mode = 'ok';
 });

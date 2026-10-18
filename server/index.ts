@@ -1,3 +1,4 @@
+import salesRouter from './sales.ts';
 import { llmSettings, saveLlmSettings, syncModels, testLlm, semanticFor } from './llm.ts';
 import express from 'express';
 import { randomUUID } from 'node:crypto';
@@ -576,6 +577,7 @@ app.post('/api/leads/collect', (req, res) => {
   }
   res.json({ added, restricted });
 });
+app.use('/api', salesRouter);
 app.patch('/api/leads/:id', (req, res) => {
   const lead = get<Lead>('leads', String(req.params.id));
   if (!lead) {

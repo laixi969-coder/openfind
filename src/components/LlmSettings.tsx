@@ -24,6 +24,8 @@ export function LlmSettingsPanel() {
         baseUrl: form.baseUrl,
         model: form.model,
         maxComments: form.maxComments,
+        requestTimeoutSeconds: form.requestTimeoutSeconds,
+        reviewTimeoutSeconds: form.reviewTimeoutSeconds,
         ...(key || clear ? { apiKey: key } : {}),
       },
       'PUT',
@@ -143,6 +145,35 @@ export function LlmSettingsPanel() {
               />
             </label>
           </div>
+          <div className="field-row">
+            <label>
+              单次模型请求时限（秒）
+              <input
+                aria-label="单次模型请求时限"
+                type="number"
+                min={20}
+                max={300}
+                value={form.requestTimeoutSeconds}
+                onChange={(e) =>
+                  setForm({ ...form, requestTimeoutSeconds: Number(e.target.value) })
+                }
+              />
+            </label>
+            <label>
+              整轮模型复核时限（秒）
+              <input
+                aria-label="整轮模型复核时限"
+                type="number"
+                min={60}
+                max={3600}
+                value={form.reviewTimeoutSeconds}
+                onChange={(e) => setForm({ ...form, reviewTimeoutSeconds: Number(e.target.value) })}
+              />
+            </label>
+          </div>
+          <p className="field-hint">
+            建议单次120秒、整轮900秒；每5条保存一次。超时保留结果，继续时跳过有效缓存。此设置只影响模型，不改变平台验证码、限流或采集间隔。
+          </p>
           <p className="field-hint">
             支持 OpenAI 兼容的 /models 与 /chat/completions JSON
             接口；同步的是所填服务当前可见列表，不代表每个模型均支持文本生成。列表中保留选中模型，避免自动升级改变判断。

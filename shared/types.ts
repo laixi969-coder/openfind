@@ -225,6 +225,8 @@ export interface SemanticReview {
   inputHash: string;
 }
 export interface LlmSettings {
+  requestTimeoutSeconds: number;
+  reviewTimeoutSeconds: number;
   enabled: boolean;
   baseUrl: string;
   model: string;

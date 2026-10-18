@@ -31,6 +31,8 @@ export const llmSettingsSchema = z
     model: z.string().trim().max(200),
     apiKey: z.string().max(10000).optional(),
     maxComments: z.number().int().min(1).max(200),
+    requestTimeoutSeconds: z.number().int().min(20).max(300).optional(),
+    reviewTimeoutSeconds: z.number().int().min(60).max(3600).optional(),
   })
   .strict();
 export function llmSettings(): LlmSettings {
@@ -40,6 +42,8 @@ export function llmSettings(): LlmSettings {
     model: configGet('llm:model'),
     hasApiKey: !!configGet('llm:key'),
     maxComments: Number(configGet('llm:maxComments', '100')),
+    requestTimeoutSeconds: Number(configGet('llm:requestTimeoutSeconds', '120')),
+    reviewTimeoutSeconds: Number(configGet('llm:reviewTimeoutSeconds', '900')),
     models: JSON.parse(configGet('llm:models', '[]')),
     modelsSyncedAt: configGet('llm:modelsSyncedAt') || undefined,
     testedAt: configGet('llm:testedAt') || undefined,
@@ -52,6 +56,16 @@ export function saveLlmSettings(input: unknown) {
     throw new z.ZodError([
       { code: 'custom', path: ['model'], message: '启用前请填写模型服务地址和模型 ID' },
     ]);
+  const requestTimeoutSeconds = next.requestTimeoutSeconds ?? old.requestTimeoutSeconds;
+  const reviewTimeoutSeconds = next.reviewTimeoutSeconds ?? old.reviewTimeoutSeconds;
+  if (reviewTimeoutSeconds < requestTimeoutSeconds)
+    throw new z.ZodError([
+      {
+        code: 'custom',
+        path: ['reviewTimeoutSeconds'],
+        message: '整轮复核时限不能小于单次请求时限',
+      },
+    ]);
   const base = next.baseUrl.replace(/\/+$/, '');
   const changed = base !== old.baseUrl;
   if (changed && next.apiKey === undefined && old.hasApiKey)
@@ -62,6 +76,8 @@ export function saveLlmSettings(input: unknown) {
         message: '更换服务地址时请重新输入该服务的 API Key，或明确清空旧 Key',
       },
     ]);
+  configSet('llm:requestTimeoutSeconds', String(requestTimeoutSeconds));
+  configSet('llm:reviewTimeoutSeconds', String(reviewTimeoutSeconds));
   const revision = changed || next.model !== old.model || next.apiKey !== undefined;
   if (next.apiKey !== undefined) configSet('llm:key', next.apiKey ? encrypt(next.apiKey) : '');
   for (const k of ['enabled', 'model', 'maxComments'] as const)
@@ -92,13 +108,15 @@ async function modelRequest(path: string, body?: unknown, signal?: AbortSignal) 
       },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: signal
-        ? AbortSignal.any([signal, AbortSignal.timeout(60000)])
-        : AbortSignal.timeout(60000),
+        ? AbortSignal.any([signal, AbortSignal.timeout(settings.requestTimeoutSeconds * 1000)])
+        : AbortSignal.timeout(settings.requestTimeoutSeconds * 1000),
     });
   } catch (error) {
     if (signal?.aborted) signal.throwIfAborted();
     if ((error as Error).name === 'TimeoutError')
-      throw new Error('模型请求超过本地60秒时限，已保留完成结果；请稍后继续复核');
+      throw new Error(
+        `模型请求超过本地${settings.requestTimeoutSeconds}秒时限，已保留完成结果；请稍后继续复核`,
+      );
     throw new Error('模型服务连接失败，请检查地址、网络及服务状态');
   }
   if (!response.ok)
@@ -258,8 +276,8 @@ export async function reviewSemantics(
       { code: 'custom', path: ['model'], message: '请先在连接设置保存模型服务地址和模型 ID' },
     ]);
   const modelSignal = signal
-    ? AbortSignal.any([signal, AbortSignal.timeout(300000)])
-    : AbortSignal.timeout(300000);
+    ? AbortSignal.any([signal, AbortSignal.timeout(settings.reviewTimeoutSeconds * 1000)])
+    : AbortSignal.timeout(settings.reviewTimeoutSeconds * 1000);
   const eligible = comments.filter(
     (c) =>
       !assessComment(
@@ -370,6 +388,8 @@ export async function reviewSemantics(
     return `模型补充复核完成：本次${reviewed}条，缓存${eligible.length - uncached.length}条，因单次上限未处理${uncached.length - pending.length}条；模型仅提供复核建议，不替代硬性排除和人工判断`;
   } catch (e) {
     if (signal?.aborted) signal.throwIfAborted();
+    if (modelSignal.aborted)
+      return `模型整轮复核超过本地${settings.reviewTimeoutSeconds}秒时限，已保存${reviewed}条，本地规则结果已保留，可继续复核`;
     return `模型补充复核未完成（已完成${reviewed}条）：${(e as Error).message}；本地规则结果已保留`;
   }
 }

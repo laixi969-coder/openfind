@@ -253,3 +253,46 @@ test('model settings sync available IDs, test generation and display optional se
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
+
+test('sales workbench logs actual conversations, requires outcome evidence and persists stop-contact', async ({
+  page,
+}) => {
+  await page.goto('/#acquisition');
+  if (!(await page.locator('.workflow-status').count())) {
+    await page.getByRole('button', { name: '一键执行获客', exact: true }).click();
+    await expect(page.locator('.workflow-status')).toHaveText('已完成');
+  }
+  await page.goto('/#leads');
+  await page.getByRole('button', { name: '查看与跟进', exact: true }).first().click();
+  const desk = page.getByRole('region', { name: '沟通成交工作台' });
+  await expect(desk.getByText('先填写真实业务身份', { exact: false })).toBeVisible();
+  await desk.getByText('真实业务资料 · 生成话术前填写', { exact: true }).click();
+  await desk.getByLabel('业务身份', { exact: true }).fill('测试家居顾问');
+  await desk.getByLabel('产品或服务', { exact: true }).fill('测试花瓶选型');
+  await desk.getByLabel('这次能提供的具体帮助', { exact: true }).fill('提供可核实的尺寸说明');
+  await desk.getByRole('button', { name: '保存业务资料', exact: true }).click();
+  await expect(desk.getByRole('button', { name: '复制本次沟通草稿', exact: true })).toBeVisible();
+  await desk.getByLabel('沟通记录类型', { exact: true }).selectOption('outgoing');
+  await desk.getByLabel('实际沟通内容', { exact: true }).fill('实际已确认需求是否仍存在（演示）');
+  await desk.getByRole('button', { name: '登记沟通记录', exact: true }).click();
+  await expect(desk.getByText('首条沟通尚无回复', { exact: false })).toBeVisible();
+  await desk.getByLabel('沟通记录类型', { exact: true }).selectOption('incoming');
+  await desk.getByLabel('实际沟通内容', { exact: true }).fill('想买桌面花瓶，这周需要（演示）');
+  await desk.getByRole('button', { name: '登记沟通记录', exact: true }).click();
+  await desk.getByLabel('客户确认的需求', { exact: true }).fill('桌面花瓶');
+  await desk.getByLabel('行动时间', { exact: true }).fill('本周');
+  await desk.getByLabel('销售阶段', { exact: true }).selectOption('qualified');
+  await desk.getByRole('button', { name: '保存销售进展', exact: true }).click();
+  await expect(page.getByText('销售进展已保存', { exact: true })).toBeVisible();
+  await desk.getByLabel('沟通记录类型', { exact: true }).selectOption('optout');
+  await desk.getByLabel('实际沟通内容', { exact: true }).fill('不需要了，请停止联系（演示）');
+  await desk.getByRole('button', { name: '登记沟通记录', exact: true }).click();
+  await expect(desk.getByText('对方已拒绝联系：', { exact: false })).toBeVisible();
+  await page.reload();
+  await page.getByRole('button', { name: '查看与跟进', exact: true }).first().click();
+  await expect(
+    page.getByRole('region', { name: '沟通成交工作台' }).getByLabel('销售阶段', { exact: true }),
+  ).toHaveValue('lost');
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(391);
+});
