@@ -1,4 +1,5 @@
-import { reviewSemantics } from './llm.ts';
+import { reviewSemantics, semanticFor, llmSettings } from './llm.ts';
+import { compareQualifications } from './qualification-comparison.ts';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import type {
@@ -64,11 +65,17 @@ export function createWorkflow(input: AcquisitionInput): AcquisitionWorkflow {
   return w;
 }
 export function recoverWorkflows() {
-  for (const w of all<AcquisitionWorkflow>('workflows'))
+  for (const w of all<AcquisitionWorkflow>('workflows')) {
+    if (w.reviewProgress?.status === 'running') {
+      w.reviewProgress.status = 'failed';
+      w.reviewProgress.message = '服务重启，模型复核已中断，已保存结果可继续复核';
+      saveWorkflow(w);
+    }
     if (w.status === 'running') {
       w.status = 'paused';
       saveWorkflow(w, '服务重启，已保留检查点；点击继续流程，已完成步骤不会重跑');
     }
+  }
 }
 const unique = (ids: string[]) => [...new Set(ids)];
 function scopedNotes(w: AcquisitionWorkflow, ids: string[]) {
@@ -128,7 +135,11 @@ export function qualify(w: AcquisitionWorkflow) {
   w.leadIds = [...ids];
   saveWorkflow(w);
 }
-export async function reviewWorkflowQualification(w: AcquisitionWorkflow, signal?: AbortSignal) {
+export async function reviewWorkflowQualification(
+  w: AcquisitionWorkflow,
+  signal?: AbortSignal,
+  useModel = false,
+) {
   const original =
     w.qualificationReview?.originalCommentIds ||
     w.leadIds.map((id) => get<Lead>('leads', id)?.commentId).filter((id): id is string => !!id);
@@ -142,7 +153,41 @@ export async function reviewWorkflowQualification(w: AcquisitionWorkflow, signal
         w.selectedNoteIds.includes(c.noteId) &&
         notes.some((n) => n.id === c.noteId && n.platform === w.input.platform),
     );
-  const semanticStatus = await reviewSemantics(comments, notes, signal, all<Comment>('comments'));
+  const modelActive = useModel || llmSettings().enabled;
+  let semanticStatus: string;
+  try {
+    semanticStatus = await reviewSemantics(
+      comments,
+      notes,
+      signal,
+      all<Comment>('comments'),
+      useModel,
+      (progress) => {
+        const now = new Date().toISOString();
+        w.reviewProgress = {
+          ...progress,
+          status: 'running',
+          message: `模型复核：${progress.reviewed}/${progress.eligible}条已完成，本地排除${progress.excluded}条`,
+          startedAt: w.reviewProgress?.status === 'running' ? w.reviewProgress.startedAt : now,
+          updatedAt: now,
+        };
+        saveWorkflow(w);
+      },
+    );
+  } catch (error) {
+    if (modelActive && w.reviewProgress) {
+      w.reviewProgress.status = 'failed';
+      w.reviewProgress.message = '模型复核已中断，已完成结果保留，可继续复核';
+      saveWorkflow(w);
+    }
+    throw error;
+  }
+  if (modelActive && w.reviewProgress) {
+    w.reviewProgress.status = w.reviewProgress.pending === 0 ? 'completed' : 'failed';
+    w.reviewProgress.message = semanticStatus;
+    w.reviewProgress.updatedAt = new Date().toISOString();
+  }
+
   signal?.throwIfAborted();
   qualify(w);
   const current = w.leadIds.map((id) => get<Lead>('leads', id)!.commentId);
@@ -154,6 +199,18 @@ export async function reviewWorkflowQualification(w: AcquisitionWorkflow, signal
     removedCommentIds: original.filter((id) => !current.includes(id)),
     reviewedCommentCount: comments.length,
     semanticStatus,
+    comparison: compareQualifications(
+      comments.map((c) => ({
+        ...c,
+        semantic: semanticFor(
+          c,
+          notes.find((n) => n.id === c.noteId),
+          all<Comment>('comments'),
+        ),
+      })),
+      notes,
+      all<Comment>('comments'),
+    ),
   };
   saveWorkflow(w);
   return w.qualificationReview;

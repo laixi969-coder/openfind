@@ -182,7 +182,30 @@ export interface AcquisitionInput {
   commentLimit: number;
   supplement: boolean;
 }
+export interface QualificationComparison {
+  total: number;
+  reviewed: number;
+  excluded: number;
+  pending: number;
+  agreed: number;
+  ruleOnly: number;
+  modelOnly: number;
+  typeDifferences: number;
+  rows: {
+    commentId: string;
+    ruleIntent: string;
+    ruleAccepted: boolean;
+    modelIntent?: string;
+    modelAccepted?: boolean;
+    status: 'excluded' | 'pending' | 'agree' | 'rule_only' | 'model_only' | 'type_difference';
+    ruleReason: string;
+    modelReason?: string;
+    restrictions: string[];
+    withinSevenDays: boolean;
+  }[];
+}
 export interface QualificationReview {
+  comparison?: QualificationComparison;
   reviewedAt: string;
   version: string;
   originalCommentIds: string[];
@@ -192,6 +215,7 @@ export interface QualificationReview {
   semanticStatus: string;
 }
 export interface SemanticReview {
+  validationWarning?: string;
   verdict: 'purchase' | 'service' | 'interest' | 'discussion' | 'resolved';
   reason: string;
   quotes: string[];
@@ -212,6 +236,17 @@ export interface LlmSettings {
 }
 export interface AcquisitionWorkflow {
   qualificationReview?: QualificationReview;
+  reviewProgress?: {
+    status: 'running' | 'completed' | 'failed';
+    total: number;
+    eligible: number;
+    excluded: number;
+    reviewed: number;
+    pending: number;
+    message: string;
+    startedAt: string;
+    updatedAt: string;
+  };
 
   id: string;
   input: AcquisitionInput;

@@ -287,3 +287,28 @@ test('Re-review preserves original candidates and CRM notes, demotes budget comp
   await reviewWorkflowQualification(w);
   assert.deepEqual(w.qualificationReview!.originalCommentIds, [budget.id]);
 });
+
+test('Restart marks interrupted manual model reviews as stopped without losing completed workflow data', () => {
+  const w = createWorkflow({ ...input, keyword: 'manual-review-recovery' });
+  w.status = 'completed';
+  w.stage = 'done';
+  w.commentIds = ['kept-comment'];
+  w.reviewProgress = {
+    status: 'running',
+    total: 10,
+    eligible: 8,
+    excluded: 2,
+    reviewed: 5,
+    pending: 3,
+    message: 'running',
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  put('workflows', w);
+  recoverWorkflows();
+  const restored = get<AcquisitionWorkflow>('workflows', w.id)!;
+  assert.equal(restored.status, 'completed');
+  assert.equal(restored.reviewProgress!.status, 'failed');
+  assert.equal(restored.reviewProgress!.reviewed, 5);
+  assert.deepEqual(restored.commentIds, ['kept-comment']);
+});

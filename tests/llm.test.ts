@@ -6,9 +6,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 const dir = mkdtempSync(join(tmpdir(), 'openfind-llm-'));
 process.env.OPENFIND_DATA_DIR = dir;
-const { db, configGet } = await import('../server/store.ts');
-const { saveLlmSettings, llmSettings, syncModels, testLlm, reviewSemantics, semanticFor } =
-  await import('../server/llm.ts');
+const { db, configGet, get, all } = await import('../server/store.ts');
+const {
+  saveLlmSettings,
+  llmSettings,
+  syncModels,
+  testLlm,
+  reviewSemantics,
+  semanticFor,
+  semanticInput,
+} = await import('../server/llm.ts');
 const { demoNotes, demoComments } = await import('../server/demo.ts');
 let mode = 'ok';
 const requests: { url: string; body: any; authorization?: string }[] = [];
@@ -47,9 +54,15 @@ const server = createServer(async (req, res) => {
   const input = JSON.parse(body.messages[1].content).untrustedComments;
   const items = input.map((x: any) => ({
     id: x.id,
-    verdict: 'purchase',
+    verdict: mode === 'resolved' ? 'resolved' : 'purchase',
     reason: '明确咨询购买路径，尚未下单',
-    quotes: [mode === 'bad-quote' ? '并不存在的购买承诺' : x.comment],
+    quotes: [
+      mode === 'bad-quote'
+        ? '并不存在的购买承诺'
+        : mode === 'parent-only'
+          ? x.thread[0].text
+          : x.comment,
+    ],
     limitations: ['还需本人确认需求'],
   }));
   if (mode === 'duplicate' && items.length > 1) items[1].id = items[0].id;
@@ -154,4 +167,106 @@ test('Semantic review is optional, bounded, redacted, quoted, cached and fails w
   const cancel = new AbortController();
   cancel.abort();
   await assert.rejects(() => reviewSemantics([other], [note], cancel.signal));
+});
+
+test('One-off model review works with automatic review disabled and reports every saved batch', async () => {
+  mode = 'ok';
+  saveLlmSettings({ enabled: false, baseUrl: base, model: 'chat-old', maxComments: 100 });
+  const note = { ...demoNotes('家居', 1)[0], title: '家居好物', body: '', tags: [] };
+  const comments = Array.from({ length: 6 }, (_, i) => ({
+    ...demoComments(note.id, 1)[0],
+    id: 'one-off-' + i,
+    authorId: 'reader-' + i,
+    body: '洗手刷有链接吗',
+    createdAt: new Date().toISOString(),
+  }));
+  const updates: number[] = [];
+  const result = await reviewSemantics(comments, [note], undefined, comments, true, (p) =>
+    updates.push(p.reviewed),
+  );
+  assert.match(result, /本次6条/);
+  assert.equal(llmSettings().enabled, false);
+  assert.deepEqual(updates, [0, 5, 6]);
+  const { compareQualifications } = await import('../server/qualification-comparison.ts');
+  const enriched = comments.map((c) => ({ ...c, semantic: semanticFor(c, note, comments) }));
+  const comparison = compareQualifications(enriched, [note], enriched);
+  assert.equal(comparison.reviewed, 6);
+  assert.equal(comparison.agreed, 6);
+});
+
+test('Thread ownership is explicit and parent-only citations are rejected; previous model evidence is retained', async () => {
+  saveLlmSettings({ enabled: false, baseUrl: base, model: 'chat-old', maxComments: 100 });
+  const note = { ...demoNotes('家居', 1)[0], title: '花瓶', body: '', tags: [] };
+  const root = {
+    ...demoComments(note.id, 1)[0],
+    id: 'ownership-root',
+    authorId: 'reader-a',
+    body: '花瓶有链接吗',
+    createdAt: new Date().toISOString(),
+  };
+  const reply = {
+    ...root,
+    id: 'ownership-reply',
+    authorId: 'reader-b',
+    parentId: root.id,
+    body: '好漂亮',
+  };
+  const context = [root, reply];
+  assert.equal(semanticInput(reply, note, context).thread[0].role, 'other_commenter');
+  assert.equal(
+    semanticInput({ ...reply, authorId: root.authorId }, note, context).thread[0].role,
+    'same_commenter',
+  );
+  const creatorAnswer = {
+    ...root,
+    id: 'ownership-answer',
+    parentId: root.id,
+    authorId: note.authorId,
+    body: '换浅色家具',
+  };
+  const thanks = { ...root, id: 'ownership-thanks', parentId: root.id, body: '好的，谢谢' };
+  const thread = semanticInput(root, note, [...context, creatorAnswer, thanks]).thread;
+  assert.ok(thread.some((x) => x.role === 'creator' && x.text === creatorAnswer.body));
+  assert.ok(thread.some((x) => x.role === 'same_commenter' && x.text === thanks.body));
+  assert.ok(!thread.some((x) => x.text === root.body));
+  mode = 'parent-only';
+  assert.match(await reviewSemantics([reply], [note], undefined, context, true), /引用无法/);
+  assert.equal(semanticFor(reply, note, context), undefined);
+  mode = 'ok';
+  await reviewSemantics([root], [note], undefined, context, true);
+  const previous = get<any>('semanticReviews', root.id);
+  const changed = { ...root, body: '花瓶在哪里买' };
+  await reviewSemantics([changed], [note], undefined, [changed, reply], true);
+  assert.ok(
+    all<any>('semanticReviewHistory').some(
+      (x) => x.inputHash === previous.inputHash && x.reviewedAt === previous.reviewedAt,
+    ),
+  );
+  assert.notEqual(semanticFor(changed, note, [changed, reply])?.inputHash, previous.inputHash);
+});
+
+test('A creator purchase cannot establish that the reader has bought; raw model evidence stays intact', async () => {
+  mode = 'resolved';
+  saveLlmSettings({ enabled: false, baseUrl: base, model: 'chat-old', maxComments: 100 });
+  const note = { ...demoNotes('家居', 1)[0], title: '电视', body: '', tags: [] };
+  const root = {
+    ...demoComments(note.id, 1)[0],
+    id: 'resolved-reader',
+    authorId: 'reader',
+    body: '电视小了点',
+    createdAt: new Date().toISOString(),
+  };
+  const creator = {
+    ...root,
+    id: 'resolved-creator',
+    parentId: root.id,
+    authorId: note.authorId,
+    body: '我买了85寸又换了75寸',
+  };
+  await reviewSemantics([root], [note], undefined, [root, creator], true);
+  const reviewed = semanticFor(root, note, [root, creator]);
+  assert.equal(reviewed?.verdict, 'interest');
+  assert.match(reviewed!.validationWarning!, /未见本人/);
+  assert.equal(get<any>('semanticReviews', root.id).verdict, 'resolved');
+  mode = 'ok';
 });

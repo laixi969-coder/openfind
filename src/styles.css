@@ -4645,3 +4645,11 @@ blockquote {
   background: #f0f4fc;
   border-radius: 8px;
 }
+.workflow-model-progress {
+  background: #f0f4fc;
+  color: #35527e;
+  border-radius: 8px;
+  padding: 14px 18px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}

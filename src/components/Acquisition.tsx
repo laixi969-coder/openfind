@@ -1,3 +1,4 @@
+import { QualificationComparison } from './QualificationComparison';
 import { AssessmentDetails } from './AssessmentDetails';
 import { CollectionBudget } from './CollectionBudget';
 import { useState } from 'react';
@@ -27,7 +28,8 @@ export function Acquisition() {
   const [reviewFilter, setReviewFilter] = useState('all');
   const flow = flows.find((w) => w.id === flowId);
   const active =
-    flows.some((w) => w.status === 'running') || data.jobs.some((j) => j.status === 'running');
+    flows.some((w) => w.status === 'running' || w.reviewProgress?.status === 'running') ||
+    data.jobs.some((j) => j.status === 'running');
   const notes =
     flow?.noteIds.map((id) => data.notes.find((n) => n.id === id)).filter((n) => !!n) || [];
   const comments =
@@ -72,13 +74,19 @@ export function Acquisition() {
       setBusy(false);
     }
   }
-  async function review() {
+  async function review(useModel = false) {
     if (!flow) return;
     setBusy(true);
     try {
-      await api(`/workflows/${flow.id}/review`, {});
+      const reviewed = await api<AcquisitionWorkflow>(`/workflows/${flow.id}/review`, { useModel });
       await refresh();
-      notify('全部评论已复核，保留原候选变更记录');
+      const incomplete = reviewed.reviewProgress?.status === 'failed';
+      notify(
+        incomplete
+          ? `规则复核完成，模型仍有${reviewed.reviewProgress!.pending}条待处理；已保存完成结果`
+          : '全部评论已复核，保留原候选变更记录',
+        incomplete,
+      );
     } catch (e) {
       notify((e as Error).message, true);
     } finally {
@@ -219,6 +227,11 @@ export function Acquisition() {
                   {busy ? '复核中…' : '重新复核全部评论'}
                 </button>
               )}
+              {flow.status === 'completed' && (
+                <button className="btn" disabled={busy || active} onClick={() => void review(true)}>
+                  本次使用模型复核
+                </button>
+              )}
               <span className={'workflow-status ' + flow.status}>
                 {flow.status === 'completed'
                   ? '已完成'
@@ -269,6 +282,13 @@ export function Acquisition() {
                 </li>
               ))}
             </ol>
+            {flow.reviewProgress && (
+              <p className="workflow-model-progress" role="status">
+                {flow.reviewProgress.message}（总范围 {flow.reviewProgress.total}，本地排除{' '}
+                {flow.reviewProgress.excluded}，有效结果 {flow.reviewProgress.reviewed}，待处理{' '}
+                {flow.reviewProgress.pending}）
+              </p>
+            )}
             <p className="workflow-message" role="status">
               {flow.message}
             </p>
@@ -294,6 +314,13 @@ export function Acquisition() {
                 </div>
               ))}
             </div>
+            {flow.qualificationReview?.comparison && (
+              <QualificationComparison
+                comparison={flow.qualificationReview.comparison}
+                comments={comments}
+                notes={notes}
+              />
+            )}
             {flow.qualificationReview && (
               <section className="qualification-review" aria-label="线索逐条复核">
                 <h3>线索逐条复核 · {flow.qualificationReview.version}</h3>

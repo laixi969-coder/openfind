@@ -229,14 +229,21 @@ test('model settings sync available IDs, test generation and display optional se
     await page.reload();
     await expect(page.getByLabel('复核模型 ID', { exact: true })).toHaveValue('fixture-chat-new');
     await expect(page.getByLabel('模型 API Key', { exact: true })).toHaveValue('');
-    await page.getByLabel('启用语义补充复核', { exact: false }).check();
+    // Run this review explicitly without enabling future automatic data transfers.
     await page.getByRole('button', { name: '保存模型设置', exact: true }).click();
     await expect(page.getByText('模型配置已保存', { exact: true })).toBeVisible();
     await page.goto('/#acquisition');
+    // This test must also work alone with a fresh isolated workspace.
+    if (!(await page.locator('.workflow-status').count())) {
+      await page.getByRole('button', { name: '一键执行获客', exact: true }).click();
+    }
     await expect(page.locator('.workflow-status')).toHaveText('已完成');
     const before = await page.locator('.workflow-lead').count();
-    await page.getByRole('button', { name: '重新复核全部评论', exact: true }).click();
+    await page.getByRole('button', { name: '本次使用模型复核', exact: true }).click();
     await expect(page.getByLabel('线索逐条复核')).toContainText('模型补充复核完成');
+    await page.getByText(/规则与模型对照 · 已复核/).click();
+    await expect(page.locator('.comparison-panel')).toContainText('有效模型结果');
+    expect((await (await page.request.get('/api/llm')).json()).enabled).toBe(false);
     await expect(page.locator('.workflow-lead')).toHaveCount(before);
     await page.locator('.workflow-lead .assessment-details summary').first().click();
     await expect(page.locator('.workflow-lead .semantic-result').first()).toContainText(

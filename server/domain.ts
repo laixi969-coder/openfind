@@ -50,7 +50,7 @@ export function parseIntent(text: string) {
     explanation: `搜索「${keyword}」的${limit === 0 ? '全部' : limit + '篇'}${/视频/.test(text) ? '视频' : '作品'}，按${/热门|爆款|高互动|最火/.test(text) ? '热度' : /最新|最近/.test(text) ? '发布时间' : '相关性'}排序`,
   };
 }
-export const qualificationVersion = 'intent-rules-3.0';
+export const qualificationVersion = 'intent-rules-3.1';
 export function intentScore(
   body: string,
   createdAt = '',
@@ -112,7 +112,13 @@ export function intentScore(
     /有没有实物图|有实物图|好些个都是我很需要|我也想要|想要同款|好想要|这种怎么改|适合什么风格/.exec(
       text,
     );
+  const plannedPurchase =
+    !/(?:不|没)(?:想|会|打算|准备|计划|要去)|假如|如果|要是|听说|他说|她说|朋友说/.test(text) &&
+    /(?:要去|准备去|打算去|计划去)[^。！？?\n]{0,24}买(?:花|灯|地毯|沙发|花瓶|家具|一|个|这|同款)/.exec(
+      text,
+    );
   const demand =
+    plannedPurchase ||
     path ||
     sharing ||
     service ||
@@ -129,6 +135,8 @@ export function intentScore(
           : costComparison || vague
             ? 'interest'
             : 'discussion';
+  if (plannedPurchase)
+    evidence.push({ label: '本人明确表达前往采购的计划，未证实下单', excerpt: body, points: 10 });
   if (demand && !costComparison)
     evidence.push({
       label: service ? '主动请求设计或改造服务' : '明确表达产品需求或询价',

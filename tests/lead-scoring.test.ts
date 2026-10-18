@@ -168,3 +168,20 @@ test('Seven-day workflow window is exact and not rounded to nearly eight days', 
     false,
   );
 });
+
+test('Explicit planned shopping is recognized without treating an old statement as a fresh lead', () => {
+  const body = '要去市场照着你的花束买花去了';
+  const recent = intentScore(body, when(0), '插花', now);
+  assert.equal(recent.intentType, 'purchase');
+  assert.equal(recent.recommended, true);
+  assert.ok(recent.evidence.some((e) => e.label.includes('前往采购')));
+  assert.equal(intentScore(body, when(20), '插花', now).withinSevenDays, false);
+  for (const text of [
+    '如果要去市场买花就好了',
+    '朋友说要去市场买花',
+    '我不打算去市场买花',
+    '我在许愿，希望博主出假花版',
+    '好漂亮！',
+  ])
+    assert.equal(intentScore(text, when(0), '插花', now).recommended, false, text);
+});
