@@ -261,3 +261,29 @@ test('Exhausted network quota still permits eligible local cache without extendi
   assert.equal(protectionStatus('douyin').counts.search, 100);
   assert.equal(get<any>('jobs', w.searchJobIds[0]).dataFetchedAt, timestamp);
 });
+
+test('Re-review preserves original candidates and CRM notes, demotes budget comparisons and recovers contextual requests', async () => {
+  const { reviewWorkflowQualification } = await import('../server/workflows.ts');
+  const { toLead } = await import('../server/domain.ts');
+  const n = { ...note('audit-note'), title: '装修与软装设计', body: '', tags: [] };
+  put('notes', n);
+  const budget = comment(n, 'budget', '硬装+软装10w吗');
+  const root = comment(n, 'root', '门楣给个链接吗');
+  const reply = { ...comment(n, 'reply', '我也想要'), parentId: root.id };
+  for (const c of [budget, root, reply]) put('comments', c);
+  const original = { ...toLead(budget, n), memo: '原始跟进备注', status: 'contacted' as const };
+  put('leads', original);
+  const w = createWorkflow({ ...input, mode: 'demo' });
+  w.status = 'completed';
+  w.stage = 'done';
+  w.selectedNoteIds = [n.id];
+  w.commentIds = [budget.id, root.id, reply.id];
+  w.leadIds = [original.id];
+  await reviewWorkflowQualification(w);
+  assert.equal(w.leadIds.length, 2);
+  assert.deepEqual(w.qualificationReview!.removedCommentIds, [budget.id]);
+  assert.equal(w.qualificationReview!.addedCommentIds.length, 2);
+  assert.equal(get<any>('leads', original.id).memo, '原始跟进备注');
+  await reviewWorkflowQualification(w);
+  assert.deepEqual(w.qualificationReview!.originalCommentIds, [budget.id]);
+});

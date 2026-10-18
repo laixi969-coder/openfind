@@ -1,3 +1,4 @@
+import { AssessmentDetails } from './AssessmentDetails';
 import { useState, useMemo } from 'react';
 import {
   MessageSquareText,
@@ -49,6 +50,8 @@ export function Comments() {
     assessComment(
       c,
       data.notes.find((n) => n.id === c.noteId),
+      Date.now(),
+      data.comments,
     );
   const shown = comments
     .filter(
@@ -500,6 +503,7 @@ export function Comments() {
               </p>
             )}
             <div className="intent-explainer">
+              <AssessmentDetails assessment={assessment(focused)} />
               <b>意向评分 {assessment(focused).score} / 99</b>
               <p>
                 原评论日期：
@@ -735,6 +739,7 @@ export function Leads() {
             </div>
             <blockquote>{focused.content}</blockquote>
             <div className="intent-explainer">
+              {focused.assessment && <AssessmentDetails assessment={focused.assessment} />}
               <b>评分依据 · {focused.assessment?.version || '待重新评估'}</b>
               <p>{focused.reason}</p>
               <p>

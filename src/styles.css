@@ -4576,3 +4576,72 @@ blockquote {
 .budget-grid label {
   min-width: 0;
 }
+
+.llm-settings {
+  padding: 24px;
+  margin: 24px 0;
+}
+.llm-settings > p {
+  line-height: 1.8;
+}
+.llm-settings label {
+  display: block;
+  font-size: 13px;
+}
+.llm-settings input {
+  margin: 8px 0 14px;
+  width: 100%;
+}
+.llm-settings .checkbox-line {
+  display: flex;
+}
+.llm-settings input[type='checkbox'] {
+  width: auto;
+  margin: 0;
+}
+.model-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+  max-height: 240px;
+  overflow: auto;
+}
+.qualification-review {
+  margin: 24px 0;
+  padding: 20px;
+  background: #f7faf8;
+  border-radius: 12px;
+  overflow-wrap: anywhere;
+}
+.review-item {
+  padding: 16px 0;
+  border-bottom: 1px solid #e2e7e3;
+  font-size: 13px;
+  line-height: 1.7;
+}
+.review-item blockquote,
+.assessment-details blockquote {
+  margin: 8px 0;
+  padding: 8px 12px;
+  border-left: 3px solid #b7c9c0;
+  background: white;
+}
+.assessment-details {
+  font-size: 12px;
+  line-height: 1.7;
+  margin: 10px 0;
+  overflow-wrap: anywhere;
+}
+.assessment-details summary {
+  cursor: pointer;
+  color: #4a6659;
+}
+.assessment-details ul {
+  padding-left: 20px;
+}
+.semantic-result {
+  padding: 12px;
+  background: #f0f4fc;
+  border-radius: 8px;
+}

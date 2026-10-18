@@ -34,7 +34,7 @@ test('Sensitive context prevents individual marketing profiles even for neutral 
 });
 
 test('Colloquial purchase questions qualify while denials and seller answers do not', () => {
-  for (const body of ['地毯有链接吗', '沙发好看，在哪买的', '硬装+软装10w吗'])
+  for (const body of ['地毯有链接吗', '沙发好看，在哪买的'])
     assert.equal(intentScore(body, when(0), '', now).recommended, true, body);
   for (const body of ['不想买，只是看看', '有的亲，关注我，发给你链接哈', ''])
     assert.equal(intentScore(body, when(0), '', now).recommended, false, body);
@@ -61,4 +61,110 @@ test('Real comment phrasing for link requests and short price questions has expl
     assert.equal(intentScore(text, new Date().toISOString()).recommended, true, text);
   for (const text of ['不要链接了', '不用给我链接', '不问价'])
     assert.equal(intentScore(text, new Date().toISOString()).recommended, false, text);
+});
+
+test('Review separates historic cost comparison, actual product requests and service interest', () => {
+  const budget = intentScore('硬装+软装10w吗', when(0), '装修客厅', now);
+  assert.equal(budget.recommended, false);
+  assert.equal(budget.intentType, 'interest');
+  assert.match(budget.evidence.at(-1)!.label, /既有装修成本/);
+  for (const body of [
+    '头箍链接分享一下',
+    '请问静电消除器可以分享一下吗？',
+    '瑜伽袜链接',
+    '蹲个🔗',
+    '客厅主灯线上还是线下买的呀！什么牌子的麻烦推荐一下',
+  ]) {
+    const a = intentScore(body, when(0), '普通居家好物', now);
+    assert.equal(a.recommended, true, body);
+    assert.equal(a.intentType, 'purchase');
+    assert.ok(a.evidence.some((e) => e.excerpt === body));
+  }
+  for (const body of ['能帮我设计下吗？', '给我设计一下', '求改。']) {
+    const a = intentScore(body, when(0), '软装搭配思路', now);
+    assert.equal(a.intentType, 'service');
+    assert.equal(a.recommended, true);
+    assert.ok(a.limitations!.some((l) => l.includes('免费建议')));
+  }
+  for (const body of [
+    'AI的吗？有没有实物图呢',
+    '这种适合什么风格',
+    '这种怎么改',
+    '好些个都是我很需要的',
+  ])
+    assert.equal(intentScore(body, when(0), '软装', now).recommended, false, body);
+  assert.equal(intentScore('第七个我买了，怎么那么好看', when(0), '', now).stage, 'resolved');
+});
+test('Thread evidence resolves co-requests while preserving authors, scope and sensitive exclusions', async () => {
+  const { assessComment } = await import('../server/domain.ts');
+  const { demoNotes, demoComments } = await import('../server/demo.ts');
+  const note = { ...demoNotes('家居', 1)[0], title: '软装搭配', body: '', tags: [] };
+  const root = {
+    ...demoComments(note.id, 1)[0],
+    id: 'root',
+    body: '门楣可以给个链接吗？',
+    authorId: 'buyer-a',
+    createdAt: when(1),
+  };
+  const reply = {
+    ...root,
+    id: 'reply',
+    parentId: 'root',
+    body: '我也想要',
+    authorId: 'buyer-b',
+    createdAt: when(0),
+  };
+  const a = assessComment(reply, note, now, [root, reply]);
+  assert.equal(a.recommended, true);
+  assert.equal(a.threadEvidence![0].commentId, 'root');
+  assert.equal(
+    assessComment(reply, note, now, [{ ...root, noteId: 'other' }, reply]).recommended,
+    false,
+  );
+  assert.equal(
+    assessComment(reply, note, now, [
+      { ...root, source: root.source === 'live' ? 'demo' : 'live' },
+      reply,
+    ]).recommended,
+    false,
+  );
+  assert.equal(
+    assessComment({ ...reply, authorId: note.authorId }, note, now, [root, reply]).recommended,
+    false,
+  );
+  const health = { ...root, body: '头皮精华推荐一下' };
+  const answer = {
+    ...root,
+    id: 'answer',
+    parentId: 'root',
+    authorId: note.authorId,
+    body: '脱发用的是米诺',
+    createdAt: when(0),
+  };
+  assert.equal(assessComment(health, note, now, [health, answer]).stage, 'restricted');
+  const service = { ...root, body: '求改。' };
+  const suggestion = { ...answer, body: '可以把黑色的家具换成浅色' };
+  const thanks = {
+    ...root,
+    id: 'thanks',
+    parentId: 'root',
+    body: '好的，谢谢',
+    createdAt: when(0),
+  };
+  const reviewed = assessComment(service, note, now, [service, suggestion, thanks]);
+  assert.equal(reviewed.recommended, false);
+  assert.ok(reviewed.threadEvidence!.some((x) => x.commentId === 'thanks'));
+  const purchase = assessComment(root, note, now, [root, { ...answer, body: '实体店买的' }]);
+  assert.equal(purchase.recommended, true);
+  assert.notEqual(purchase.stage, 'resolved');
+});
+test('Seven-day workflow window is exact and not rounded to nearly eight days', () => {
+  assert.equal(
+    intentScore('求链接', new Date(now - 7 * 86400000).toISOString(), '', now).withinSevenDays,
+    true,
+  );
+  assert.equal(
+    intentScore('求链接', new Date(now - 7 * 86400000 - 1).toISOString(), '', now).withinSevenDays,
+    false,
+  );
 });

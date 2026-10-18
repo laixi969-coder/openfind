@@ -1,3 +1,4 @@
+import { AssessmentDetails } from './AssessmentDetails';
 import { CollectionBudget } from './CollectionBudget';
 import { useState } from 'react';
 import { Play, Pause, ArrowRight, Download, Workflow, CheckCircle2, Clock } from 'lucide-react';
@@ -23,6 +24,7 @@ export function Acquisition() {
   const [commentLimit, setCommentLimit] = useState(20);
   const [supplement, setSupplement] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [reviewFilter, setReviewFilter] = useState('all');
   const flow = flows.find((w) => w.id === flowId);
   const active =
     flows.some((w) => w.status === 'running') || data.jobs.some((j) => j.status === 'running');
@@ -64,6 +66,19 @@ export function Acquisition() {
     try {
       await api(`/workflows/${flow.id}/${action}`, {});
       await refresh();
+    } catch (e) {
+      notify((e as Error).message, true);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function review() {
+    if (!flow) return;
+    setBusy(true);
+    try {
+      await api(`/workflows/${flow.id}/review`, {});
+      await refresh();
+      notify('全部评论已复核，保留原候选变更记录');
     } catch (e) {
       notify((e as Error).message, true);
     } finally {
@@ -199,6 +214,11 @@ export function Acquisition() {
                 {platformName(flow.input.platform)} · {flow.input.keyword}
               </h3>
               <SourceTag source={flow.input.mode} />
+              {flow.status === 'completed' && (
+                <button className="btn" disabled={busy || active} onClick={() => void review()}>
+                  {busy ? '复核中…' : '重新复核全部评论'}
+                </button>
+              )}
               <span className={'workflow-status ' + flow.status}>
                 {flow.status === 'completed'
                   ? '已完成'
@@ -274,6 +294,55 @@ export function Acquisition() {
                 </div>
               ))}
             </div>
+            {flow.qualificationReview && (
+              <section className="qualification-review" aria-label="线索逐条复核">
+                <h3>线索逐条复核 · {flow.qualificationReview.version}</h3>
+                <p>
+                  已复核全部 {flow.qualificationReview.reviewedCommentCount} 条评论；原候选{' '}
+                  {flow.qualificationReview.originalCommentIds.length} 条，降级{' '}
+                  {flow.qualificationReview.removedCommentIds.length} 条，补入{' '}
+                  {flow.qualificationReview.addedCommentIds.length} 条。
+                  {flow.qualificationReview.semanticStatus}
+                </p>
+                <p className="field-hint">
+                  复核时间：{new Date(flow.qualificationReview.reviewedAt).toLocaleString()}
+                  。候选表示有可复核的咨询证据，不代表已确认购买或付费。降级不删除原 CRM 跟进记录。
+                </p>
+                {[
+                  ...flow.qualificationReview.originalCommentIds,
+                  ...flow.qualificationReview.addedCommentIds,
+                ].map((id) => {
+                  const c = data.comments.find((c) => c.id === id);
+                  if (!c) return null;
+                  const a = assessComment(
+                    c,
+                    data.notes.find((n) => n.id === c.noteId),
+                    Date.now(),
+                    data.comments,
+                  );
+                  const added = flow.qualificationReview!.addedCommentIds.includes(id);
+                  return (
+                    <article key={id} className="review-item">
+                      <b>
+                        {added
+                          ? '补入候选'
+                          : flow.qualificationReview!.removedCommentIds.includes(id)
+                            ? '降级待确认'
+                            : '保留原候选'}{' '}
+                        · {c.author} · {a.verdict}
+                      </b>
+                      <blockquote>{c.body}</blockquote>
+                      <p>{a.reason}</p>
+                      <p className="field-hint">
+                        所属作品：{data.notes.find((n) => n.id === c.noteId)?.title} ·{' '}
+                        {c.createdAt ? new Date(c.createdAt).toLocaleString() : '日期待核实'}
+                      </p>
+                      <AssessmentDetails assessment={a} />
+                    </article>
+                  );
+                })}
+              </section>
+            )}
             <div className="acquisition-toolbar">
               <h3>
                 本次候选线索 <small>近7天 · 明确需求 · 待人工复核</small>
@@ -304,6 +373,7 @@ export function Acquisition() {
                     </div>
                     <p>{l.content}</p>
                     <small>{l.reason}</small>
+                    {l.assessment && <AssessmentDetails assessment={l.assessment} />}
                     <button className="text-btn" onClick={() => navigate('leads')}>
                       进入客户线索复核 <ArrowRight size={12} />
                     </button>
@@ -355,13 +425,41 @@ export function Acquisition() {
             </details>
             <details open className="workflow-details">
               <summary>原始评论与判断（{comments.length}）</summary>
+              <label className="field-label">
+                筛选复核结论
+                <select
+                  aria-label="筛选复核结论"
+                  value={reviewFilter}
+                  onChange={(e) => setReviewFilter(e.target.value)}
+                >
+                  <option value="all">全部评论</option>
+                  <option value="candidate">本地规则候选</option>
+                  <option value="interest">兴趣与成本比较，待确认</option>
+                  <option value="resolved">已购买或售后</option>
+                  <option value="model">模型建议，待人工确认</option>
+                  <option value="excluded">已排除</option>
+                </select>
+              </label>
               <div className="workflow-comment-list">
                 {comments.map((c) => {
                   const a = assessComment(
                     c,
                     data.notes.find((n) => n.id === c.noteId),
+                    Date.now(),
+                    data.comments,
                   );
-                  const accepted = a.recommended && a.ageDays !== null && a.ageDays <= 7;
+                  const accepted = a.recommended && a.withinSevenDays === true;
+                  if (
+                    (reviewFilter === 'candidate' && !accepted) ||
+                    (reviewFilter === 'interest' && a.intentType !== 'interest') ||
+                    (reviewFilter === 'resolved' && a.stage !== 'resolved') ||
+                    (reviewFilter === 'excluded' && !a.exclusions.length) ||
+                    (reviewFilter === 'model' &&
+                      (!a.semantic ||
+                        !['purchase', 'service'].includes(a.semantic.verdict) ||
+                        accepted))
+                  )
+                    return null;
                   return (
                     <article key={c.id}>
                       <div>
@@ -377,6 +475,7 @@ export function Acquisition() {
                         {a.reason}
                         {a.recommended && !accepted ? ' · 超出本流程近7天窗口' : ''}
                       </small>
+                      <AssessmentDetails assessment={a} />
                     </article>
                   );
                 })}

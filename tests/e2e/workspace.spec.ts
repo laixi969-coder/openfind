@@ -173,3 +173,76 @@ test('collection budgets can be edited independently and survive reload', async 
   await expect(page.getByLabel('小红书搜索每日批次数')).toHaveValue('100');
   await expect(page.getByLabel('抖音采集额度')).toContainText('每日 UTC 00:00 重置');
 });
+
+test('model settings sync available IDs, test generation and display optional semantic evidence without changing rule candidates', async ({
+  page,
+}) => {
+  const { createServer } = await import('node:http');
+  const server = createServer(async (req, res) => {
+    let text = '';
+    for await (const chunk of req) text += chunk;
+    res.setHeader('Content-Type', 'application/json');
+    if (req.url === '/v1/models') {
+      res.end(
+        JSON.stringify({
+          data: [
+            { id: 'fixture-chat-new', created: 2 },
+            { id: 'fixture-chat-old', created: 1 },
+          ],
+        }),
+      );
+      return;
+    }
+    const body = JSON.parse(text);
+    let result: unknown = { ok: true };
+    if (!body.messages[0].content.includes('Connection test')) {
+      const input = JSON.parse(body.messages[1].content).untrustedComments;
+      result = {
+        items: input.map((x: { id: string; comment: string }) => ({
+          id: x.id,
+          verdict: 'interest',
+          reason: '兼容服务测试：还需人工确认购买计划',
+          quotes: [x.comment],
+          limitations: ['仅为本地协议测试，不代表真实模型判断'],
+        })),
+      };
+    }
+    res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(result) } }] }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    await page.goto('/#settings');
+    await page
+      .getByLabel('模型服务地址', { exact: true })
+      .fill('http://127.0.0.1:' + (server.address() as { port: number }).port + '/v1');
+    await page.getByLabel('模型 API Key', { exact: true }).fill('fixture-secret');
+    await page.getByRole('button', { name: '同步最新模型列表', exact: true }).click();
+    await expect(
+      page.getByText('已同步服务当前账号可用的 2 个模型', { exact: false }),
+    ).toBeVisible();
+    await page.getByText(/模型列表（2）/).click();
+    await page.getByRole('button', { name: 'fixture-chat-new', exact: true }).click();
+    await page.getByRole('button', { name: '测试模型连接', exact: true }).click();
+    await expect(
+      page.getByText('所选模型 fixture-chat-new 的真实生成与 JSON 输出测试通过', { exact: false }),
+    ).toBeVisible();
+    await page.reload();
+    await expect(page.getByLabel('复核模型 ID', { exact: true })).toHaveValue('fixture-chat-new');
+    await expect(page.getByLabel('模型 API Key', { exact: true })).toHaveValue('');
+    await page.getByLabel('启用语义补充复核', { exact: false }).check();
+    await page.getByRole('button', { name: '保存模型设置', exact: true }).click();
+    await expect(page.getByText('模型配置已保存', { exact: true })).toBeVisible();
+    await page.goto('/#acquisition');
+    await expect(page.locator('.workflow-status')).toHaveText('已完成');
+    const before = await page.locator('.workflow-lead').count();
+    await page.getByRole('button', { name: '重新复核全部评论', exact: true }).click();
+    await expect(page.getByLabel('线索逐条复核')).toContainText('模型补充复核完成');
+    await expect(page.locator('.workflow-lead')).toHaveCount(before);
+    await page.locator('.workflow-lead .assessment-details summary').first().click();
+    await expect(page.locator('.workflow-lead .semantic-result').first()).toContainText(
+      'fixture-chat-new',
+    );
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});

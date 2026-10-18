@@ -1,3 +1,4 @@
+import { reviewSemantics } from './llm.ts';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import type {
@@ -11,7 +12,13 @@ import type {
 } from '../shared/types.ts';
 import { all, get, put } from './store.ts';
 import { cachedJob } from './jobs-cache.ts';
-import { acquisitionPriority, assessComment, intentScore, toLead } from './domain.ts';
+import {
+  acquisitionPriority,
+  assessComment,
+  intentScore,
+  toLead,
+  qualificationVersion,
+} from './domain.ts';
 import { evaluateBudget, readInterval, protectionStatus } from './protection.ts';
 
 export const workflowRuns = new Map<string, AbortController>();
@@ -84,7 +91,7 @@ function rankedNotes(w: AcquisitionWorkflow) {
         b.note.publishedAt.localeCompare(a.note.publishedAt),
     );
 }
-function qualify(w: AcquisitionWorkflow) {
+export function qualify(w: AcquisitionWorkflow) {
   const candidates = w.commentIds
     .map((id) => get<Comment>('comments', id))
     .filter(
@@ -92,22 +99,24 @@ function qualify(w: AcquisitionWorkflow) {
     )
     .map((c) => ({ c, note: get<Note>('notes', c.noteId) }))
     .filter(({ note }) => note?.platform === w.input.platform)
-    .map(({ c, note }) => ({ c, note, assessment: assessComment(c, note) }))
-    .filter(
-      (x) => x.assessment.recommended && x.assessment.ageDays !== null && x.assessment.ageDays <= 7,
-    )
+    .map(({ c, note }) => ({
+      c,
+      note,
+      assessment: assessComment(c, note, Date.now(), all<Comment>('comments')),
+    }))
+    .filter((x) => x.assessment.recommended && x.assessment.withinSevenDays === true)
     .sort(
       (a, b) =>
         b.assessment.score - a.assessment.score || b.c.createdAt.localeCompare(a.c.createdAt),
     );
   const ids = new Set<string>();
   for (const { c, note } of candidates) {
-    const lead = toLead(c, note);
+    const lead = toLead(c, note, all<Comment>('comments'));
     if (ids.has(lead.id)) continue;
     ids.add(lead.id);
     const existing = get<Lead>('leads', lead.id);
     if (!existing) put('leads', lead);
-    else if (lead.commentCreatedAt! > (existing.commentCreatedAt || ''))
+    else if (lead.commentCreatedAt! >= (existing.commentCreatedAt || ''))
       put('leads', {
         ...lead,
         status: existing.status,
@@ -118,6 +127,36 @@ function qualify(w: AcquisitionWorkflow) {
   }
   w.leadIds = [...ids];
   saveWorkflow(w);
+}
+export async function reviewWorkflowQualification(w: AcquisitionWorkflow, signal?: AbortSignal) {
+  const original =
+    w.qualificationReview?.originalCommentIds ||
+    w.leadIds.map((id) => get<Lead>('leads', id)?.commentId).filter((id): id is string => !!id);
+  const notes = all<Note>('notes');
+  const comments = w.commentIds
+    .map((id) => get<Comment>('comments', id))
+    .filter(
+      (c): c is Comment =>
+        !!c &&
+        c.source === w.input.mode &&
+        w.selectedNoteIds.includes(c.noteId) &&
+        notes.some((n) => n.id === c.noteId && n.platform === w.input.platform),
+    );
+  const semanticStatus = await reviewSemantics(comments, notes, signal, all<Comment>('comments'));
+  signal?.throwIfAborted();
+  qualify(w);
+  const current = w.leadIds.map((id) => get<Lead>('leads', id)!.commentId);
+  w.qualificationReview = {
+    version: qualificationVersion,
+    reviewedAt: new Date().toISOString(),
+    originalCommentIds: original,
+    addedCommentIds: current.filter((id) => !original.includes(id)),
+    removedCommentIds: original.filter((id) => !current.includes(id)),
+    reviewedCommentCount: comments.length,
+    semanticStatus,
+  };
+  saveWorkflow(w);
+  return w.qualificationReview;
 }
 async function waitForPlatform(
   w: AcquisitionWorkflow,
@@ -274,7 +313,7 @@ export async function runWorkflow(w: AcquisitionWorkflow, execute: JobExecutor) 
       saveWorkflow(w, '正在复核评论日期、明确需求和排除条件，并去重保存候选');
     }
     abort.signal.throwIfAborted();
-    qualify(w);
+    await reviewWorkflowQualification(w, abort.signal);
     w.stage = 'done';
     w.status = 'completed';
     w.finishedAt = new Date().toISOString();

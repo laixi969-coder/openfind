@@ -1,3 +1,4 @@
+import { llmSettings, saveLlmSettings, syncModels, testLlm, semanticFor } from './llm.ts';
 import express from 'express';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
@@ -25,7 +26,13 @@ import {
   readInterval,
   ProtectionError,
 } from './protection.ts';
-import { createWorkflow, runWorkflow, recoverWorkflows, workflowRuns } from './workflows.ts';
+import {
+  createWorkflow,
+  runWorkflow,
+  recoverWorkflows,
+  workflowRuns,
+  reviewWorkflowQualification,
+} from './workflows.ts';
 import type {
   AcquisitionWorkflow,
   Note,
@@ -144,12 +151,16 @@ function log(j: Job, level: Job['logs'][number]['level'], message: string) {
   put('jobs', j);
 }
 recoverWorkflows();
-const active = () => running.size > 0 || workflowRuns.size > 0;
-function currentLead(lead: Lead): Lead {
+const qualificationRuns = new Set<string>();
+const active = () => running.size > 0 || workflowRuns.size > 0 || qualificationRuns.size > 0;
+function currentLead(lead: Lead, comments = all<Comment>('comments')): Lead {
   const c = get<Comment>('comments', lead.commentId);
   const note = get<Note>('notes', lead.noteId);
   const assessment = c
-    ? assessComment(c, note)
+    ? {
+        ...assessComment(c, note, Date.now(), comments),
+        semantic: semanticFor(c, note, comments),
+      }
     : intentScore(
         lead.content,
         lead.commentCreatedAt || '',
@@ -342,18 +353,27 @@ async function runJob(job: Job, input: z.infer<typeof searchSchema>, parentSigna
   }
 }
 app.get('/api/health', (_req, res) => res.json({ ok: true, name: 'openfind' }));
-app.get('/api/state', (_req, res) =>
+app.get('/api/state', (_req, res) => {
+  const comments = all<Comment>('comments');
+  const notes = all<Note>('notes');
   res.json({
     accounts: accounts(),
-    notes: all<Note>('notes'),
-    comments: all<Comment>('comments'),
-    leads: all<Lead>('leads').map(currentLead),
+    notes,
+    comments: comments.map((c) => ({
+      ...c,
+      semantic: semanticFor(
+        c,
+        notes.find((n) => n.id === c.noteId),
+        comments,
+      ),
+    })),
+    leads: all<Lead>('leads').map((l) => currentLead(l, comments)),
     drafts: all<Draft>('drafts'),
     jobs: all<Job>('jobs'),
     workflows: all<AcquisitionWorkflow>('workflows'),
     settings: settings(),
-  }),
-);
+  });
+});
 const acquisitionSchema = z.object({
   keyword: z.string().trim().min(1).max(100),
   platform: z.enum(['xiaohongshu', 'douyin']),
@@ -378,6 +398,26 @@ app.post('/api/workflows', (req, res) => {
   const w = createWorkflow(input);
   void runWorkflow(w, runJob);
   res.status(201).json(w);
+});
+app.post('/api/workflows/:id/review', async (req, res) => {
+  const w = get<AcquisitionWorkflow>('workflows', String(req.params.id));
+  if (!w) {
+    res.status(404).json({ error: '流程不存在' });
+    return;
+  }
+  if (active() || publishing.size || w.status !== 'completed') {
+    res.status(409).json({ error: '请等待当前任务结束，再复核已完成流程' });
+    return;
+  }
+  qualificationRuns.add(w.id);
+  try {
+    await reviewWorkflowQualification(w);
+    w.message = `复核完成：${w.commentIds.length}条原始评论，${w.leadIds.length}条候选；原候选降级${w.qualificationReview!.removedCommentIds.length}条，补入${w.qualificationReview!.addedCommentIds.length}条`;
+    put('workflows', w);
+    res.json(w);
+  } finally {
+    qualificationRuns.delete(w.id);
+  }
 });
 app.post('/api/workflows/:id/:action', (req, res) => {
   const w = get<AcquisitionWorkflow>('workflows', String(req.params.id));
@@ -519,7 +559,7 @@ app.post('/api/leads/collect', (req, res) => {
   for (const id of commentIds) {
     const c = get<Comment>('comments', id);
     if (c) {
-      const lead = toLead(c, get<Note>('notes', c.noteId));
+      const lead = toLead(c, get<Note>('notes', c.noteId), all<Comment>('comments'));
       if (lead.assessment?.stage === 'restricted') {
         restricted++;
         continue;
@@ -771,6 +811,16 @@ app.delete('/api/drafts/:id', (req, res) => {
   remove('drafts', String(req.params.id));
   res.json({ ok: true });
 });
+app.get('/api/llm', (_req, res) => res.json(llmSettings()));
+app.put('/api/llm', (req, res) => {
+  if (active()) {
+    res.status(409).json({ error: '请在任务或复核结束后修改模型配置' });
+    return;
+  }
+  res.json(saveLlmSettings(req.body));
+});
+app.post('/api/llm/models/sync', async (_req, res) => res.json(await syncModels()));
+app.post('/api/llm/test', async (_req, res) => res.json(await testLlm()));
 app.get('/api/settings', (_req, res) => res.json(settings()));
 app.put('/api/settings', (req, res) => {
   const input = z
@@ -969,7 +1019,7 @@ app.all('/api/export/:kind', (req, res) => {
   }
   let items = all<Record<string, unknown>>(kind);
   if (kind === 'leads')
-    items = all<Lead>('leads').map(currentLead) as unknown as Record<string, unknown>[];
+    items = all<Lead>('leads').map((l) => currentLead(l)) as unknown as Record<string, unknown>[];
   const ids =
     options?.ids ||
     String(req.query.ids || '')

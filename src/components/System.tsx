@@ -1,3 +1,4 @@
+import { LlmSettingsPanel } from './LlmSettings';
 import { useState } from 'react';
 import {
   Settings,
@@ -102,6 +103,7 @@ export function SettingsPage() {
         description="管理平台账号与数据服务，所有配置和凭证均保存在你的本机。"
       />
       <PlatformConnections />
+      <LlmSettingsPanel />
       <div className="settings-layout">
         <section className="panel settings-form">
           <div className="section-title">

@@ -415,3 +415,31 @@ test('Collection configuration API validates input and returns budgets for each 
   assert.equal(status.platforms.xiaohongshu.policy.search.dailyLimit, 100);
   assert.deepEqual(status.platforms.douyin.policy, policy);
 });
+
+test('Model config never exposes keys and completed workflow reviews route before generic actions', async () => {
+  const saved = await json<any>(
+    '/api/llm',
+    {
+      enabled: false,
+      baseUrl: 'https://example.com/v1',
+      model: 'example-chat',
+      apiKey: 'temporary-secret-for-test',
+      maxComments: 100,
+    },
+    'PUT',
+  );
+  assert.equal(saved.hasApiKey, true);
+  assert.ok(!JSON.stringify(saved).includes('temporary-secret-for-test'));
+  const read = await json<any>('/api/llm');
+  assert.equal(read.model, 'example-chat');
+  const flow = (await state()).workflows.find((w) => w.status === 'completed');
+  if (flow) {
+    const result = await json<any>(`/api/workflows/${flow.id}/review`, {});
+    assert.ok(result.qualificationReview);
+  }
+  assert.equal(
+    (await request('/api/llm', { enabled: true, baseUrl: '', model: '', maxComments: 100 }, 'PUT'))
+      .status,
+    400,
+  );
+});

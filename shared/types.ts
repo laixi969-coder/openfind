@@ -34,6 +34,7 @@ export interface Note {
   source: Mode;
 }
 export interface Comment {
+  semantic?: SemanticReview;
   platform?: Platform;
   id: string;
   noteId: string;
@@ -66,6 +67,12 @@ export interface Lead {
   createdAt: string;
 }
 export interface LeadAssessment {
+  intentType?: 'purchase' | 'service' | 'interest' | 'discussion' | 'resolved' | 'restricted';
+  verdict?: string;
+  limitations?: string[];
+  threadEvidence?: { commentId: string; role: string; text: string }[];
+  semantic?: SemanticReview;
+
   version: string;
   assessedAt: string;
   score: number;
@@ -73,6 +80,7 @@ export interface LeadAssessment {
   stage: 'demand' | 'considering' | 'resolved' | 'discussion' | 'restricted';
   recommended: boolean;
   ageDays: number | null;
+  withinSevenDays?: boolean;
   evidence: { label: string; excerpt: string; points: number }[];
   exclusions: string[];
 }
@@ -174,7 +182,37 @@ export interface AcquisitionInput {
   commentLimit: number;
   supplement: boolean;
 }
+export interface QualificationReview {
+  reviewedAt: string;
+  version: string;
+  originalCommentIds: string[];
+  addedCommentIds: string[];
+  removedCommentIds: string[];
+  reviewedCommentCount: number;
+  semanticStatus: string;
+}
+export interface SemanticReview {
+  verdict: 'purchase' | 'service' | 'interest' | 'discussion' | 'resolved';
+  reason: string;
+  quotes: string[];
+  limitations: string[];
+  model: string;
+  reviewedAt: string;
+  inputHash: string;
+}
+export interface LlmSettings {
+  enabled: boolean;
+  baseUrl: string;
+  model: string;
+  hasApiKey: boolean;
+  models: { id: string; created?: number }[];
+  modelsSyncedAt?: string;
+  testedAt?: string;
+  maxComments: number;
+}
 export interface AcquisitionWorkflow {
+  qualificationReview?: QualificationReview;
+
   id: string;
   input: AcquisitionInput;
   status: 'running' | 'paused' | 'completed';

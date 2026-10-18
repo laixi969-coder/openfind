@@ -50,6 +50,7 @@ export function parseIntent(text: string) {
     explanation: `搜索「${keyword}」的${limit === 0 ? '全部' : limit + '篇'}${/视频/.test(text) ? '视频' : '作品'}，按${/热门|爆款|高互动|最火/.test(text) ? '热度' : /最新|最近/.test(text) ? '发布时间' : '相关性'}排序`,
   };
 }
+export const qualificationVersion = 'intent-rules-3.0';
 export function intentScore(
   body: string,
   createdAt = '',
@@ -58,6 +59,7 @@ export function intentScore(
 ): LeadAssessment {
   const evidence: LeadAssessment['evidence'] = [];
   const exclusions: string[] = [];
+  const limitations: string[] = [];
   const timestamp = Date.parse(createdAt);
   const ageDays =
     Number.isFinite(timestamp) && timestamp <= now + 300000
@@ -80,71 +82,153 @@ export function intentScore(
     excerpt: createdAt || '无原始日期',
     points: fresh,
   });
+  const text = body.normalize('NFKC').replace(/🔗/gu, '链接');
   const sensitive =
-    /hpv|hiv|艾滋|宫颈|尖锐湿疣|癌症|肿瘤|感染|确诊|治疗|病情|抑郁|焦虑症|怀孕|不孕|性取向|宗教信仰/iu.test(
+    /hpv|hiv|艾滋|宫颈|尖锐湿疣|癌症|肿瘤|感染|确诊|治疗|病情|抑郁|焦虑症|怀孕|孕\d*周|\d+周.{0,10}生|🤰|不孕|性取向|宗教信仰|脱发|米诺|骨科|足弓塌陷/iu.test(
       body + '\n' + context,
     );
   const resolved =
-    /(?:已经|刚刚|刚|早就|已)(?:买到|买了|买好|购买|下单|预约|解决|找到|选好)|买好了|问题解决了|不用了|不需要了|不买了|不想买|不打算买|不要链接|不用给.{0,2}链接|不问价|已成交/.exec(
-      body,
+    /(?:已经|刚刚|刚|早就|已)(?:买到|买了|买好|购买|下单|预约|解决|找到|选好)|我买了|买好了|解决了|不用了|不需要了|不买了|不想买|不打算买|不要链接|不用给.{0,2}链接|不问价|已成交|我买的.{0,30}(?:残留|怎么|问题|坏)/.exec(
+      text.replace(/(?:还没|没|未)买/g, '尚未购'),
     );
-  const seller = /加我|私我|看我主页|看主页|厂家直销|我这有|我家有|专业代办/.exec(body);
-  const purchasePath =
-    /链接.{0,3}(?:给|发)(?:我|一个|个|一下)|(?:有|给|发).{0,4}链接(?:吗|么|[?？])|(?:求|蹲)个?链接|(?:在)?哪(?:里|儿)?买(?:的)?|怎么预约|如何预约|怎么买|想订|想下单|求联系方式|怎么联系/.exec(
-      body,
+  const seller = /加我|私我|看我主页|看主页|厂家直销|我这有|我家有|专业代办/.exec(text);
+  const path =
+    /链接.{0,6}(?:给|发|分享)|(?:有|给|发).{0,4}链接(?:吗|么|[?？])|(?:求|蹲)个?链接|(?:在)?哪(?:里|儿)?买(?:的|到)?|怎么预约|如何预约|怎么买|想订|想下单|求联系方式|怎么联系|^.{0,16}链接[?？!！。]?$/.exec(
+      text,
     );
-  const priceQuestion = /\d+(?:\.\d+)?\s*(?:w|万|元|块).{0,8}(?:吗|么|[?？])/i.exec(body);
+  const sharing =
+    /(?:静电消除器|封口器|洗手刷|罐头固定器|头箍|刷瓶豆|地毯|沙发|灯|花瓶).{0,12}(?:分享|推荐)(?:一?下|一下吗)|(?:分享|推荐)(?:一?下).{0,12}(?:牌子|品牌)|什么牌子.{0,12}推荐|线上还是线下买/.exec(
+      text,
+    );
+  const serviceContext = /装修|软装|设计|改造|客厅|家居/.test(context);
+  const service =
+    serviceContext &&
+    /(?:能|可以)?.{0,3}帮我设计|给我设计|求改|求设计|求改造|想找.{0,5}设计|找设计师/.exec(text);
+  const costComparison =
+    /(?:硬装|软装|装修|装的|花了).{0,16}\d+(?:\.\d+)?\s*(?:w|万|元|块).{0,8}(?:吗|么|[?？])/i.exec(
+      text,
+    );
+  const vague =
+    /有没有实物图|有实物图|好些个都是我很需要|我也想要|想要同款|好想要|这种怎么改|适合什么风格/.exec(
+      text,
+    );
   const demand =
-    purchasePath ||
-    priceQuestion ||
-    /多少钱|花多少|花了多少|求报价|报价多少|什么价|多少价|问价|价格多少|预算|费用多少|怎么收费|想买|想做|想订|想了解|准备买|准备装修|求推荐|需要一个|需要一套|怎么预约|求链接|怎么买|哪里买|哪里有卖|还没买/.exec(
-      body,
+    path ||
+    sharing ||
+    service ||
+    /多少钱|求报价|报价多少|什么价|多少价|问价|价格多少|费用多少|怎么收费|想买|想做|想订|准备买|准备装修|求推荐|需要一个|需要一套|哪里有卖|还没买/.exec(
+      text,
     );
-  const action = purchasePath;
-  const urgent = /今天|明天|这周|本周|近期|最近|急需|着急|马上/.exec(body);
-  if (demand) evidence.push({ label: '明确表达需求或询价', excerpt: demand[0], points: 35 });
-  if (action) evidence.push({ label: '明确询问购买或联系路径', excerpt: action[0], points: 20 });
-  if (urgent && demand) evidence.push({ label: '表达近期计划', excerpt: urgent[0], points: 10 });
-  if (resolved) exclusions.push(`已购买、已解决或不再需要：${resolved[0]}`);
-  if (seller) exclusions.push(`疑似推广而非购买咨询：${seller[0]}`);
-  if (sensitive)
-    exclusions.push(
-      '涉及健康等敏感主题，不建立个人营销画像；仅做公开内容研究或处理用户主动授权的咨询',
-    );
+  let intentType: NonNullable<LeadAssessment['intentType']> =
+    path || sharing
+      ? 'purchase'
+      : service
+        ? 'service'
+        : demand
+          ? 'purchase'
+          : costComparison || vague
+            ? 'interest'
+            : 'discussion';
+  if (demand && !costComparison)
+    evidence.push({
+      label: service ? '主动请求设计或改造服务' : '明确表达产品需求或询价',
+      excerpt: body,
+      points: 35,
+    });
+  if ((path || sharing || service) && !costComparison)
+    evidence.push({
+      label: service ? '请求为本人提供方案，付费意愿未证实' : '询问商品获取、分享或购买渠道',
+      excerpt: body,
+      points: 20,
+    });
+  if (costComparison) {
+    intentType = 'interest';
+    evidence.push({ label: '询问既有装修成本，不等于新购买或委托', excerpt: body, points: 15 });
+    limitations.push('缺少本人的采购计划或委托请求，可能仅在比较成本');
+  }
+  if (vague && !demand && !costComparison)
+    evidence.push({ label: '有兴趣或信息需求，尚无明确购买路径', excerpt: body, points: 15 });
+  if (/今天|明天|这周|本周|近期|最近|急需|着急|马上/.test(text) && demand && !costComparison)
+    evidence.push({ label: '表达近期计划', excerpt: body, points: 10 });
+  if (resolved) {
+    exclusions.push(`已购买、售后、已解决或不再需要：${resolved[0]}`);
+    intentType = 'resolved';
+  }
+  if (seller) {
+    exclusions.push(`疑似推广而非购买咨询：${seller[0]}`);
+    intentType = 'discussion';
+  }
+  if (sensitive) {
+    exclusions.push('涉及健康等敏感主题，不建立个人营销画像；仅作公开内容研究');
+    intentType = 'restricted';
+  }
   if (!body.trim()) exclusions.push('没有文字内容，无法判断购买需求');
   let score = evidence.reduce((sum, e) => sum + e.points, 0);
-  if (!demand) score = Math.min(score, 15);
+  if (intentType === 'discussion') score = Math.min(score, 15);
+  if (intentType === 'interest') score = Math.min(score, 49);
   if (ageDays === null) score = Math.min(score, 40);
   if (ageDays !== null && ageDays > 30) score = Math.min(score, 45);
   if (exclusions.length) score = 0;
   score = Math.min(99, score);
-  const stage: LeadAssessment['stage'] = sensitive
-    ? 'restricted'
-    : resolved
-      ? 'resolved'
-      : seller || !demand
-        ? 'discussion'
-        : action
-          ? 'demand'
-          : 'considering';
+  if (intentType === 'purchase')
+    limitations.push('仅能证明咨询或兴趣，未确认下单、预算、购买时间及与本业务的匹配');
+  if (intentType === 'service') limitations.push('可能寻求免费建议，未证实付费委托或预算');
+  if (ageDays !== null && ageDays > 7)
+    limitations.push('超出本流程近7天窗口，不自动加入本次候选；需人工确认需求是否仍存在');
+  const verdict = {
+    purchase: '购买渠道或产品咨询',
+    service: '设计或改造服务咨询',
+    interest: '一般兴趣，待确认购买计划',
+    discussion: '普通讨论，无购买证据',
+    resolved: '已购买、售后或需求已结束',
+    restricted: '敏感主题，仅供内容研究',
+  }[intentType];
   return {
-    version: 'intent-rules-2.2',
+    version: qualificationVersion,
     assessedAt: new Date(now).toISOString(),
     score,
-    stage,
+    intentType,
+    verdict,
+    limitations,
+    stage:
+      intentType === 'restricted'
+        ? 'restricted'
+        : intentType === 'resolved'
+          ? 'resolved'
+          : intentType === 'discussion'
+            ? 'discussion'
+            : intentType === 'interest'
+              ? 'considering'
+              : 'demand',
     recommended: score >= 50 && !exclusions.length,
     ageDays,
+    withinSevenDays: ageDays !== null && now - timestamp <= 7 * 86400000,
     evidence,
     exclusions,
     reason:
       exclusions.join('；') ||
-      (demand
-        ? `${evidence.map((e) => e.label).join(' · ')}${ageDays !== null && ageDays > 30 ? ' · 较早信息，需人工确认需求是否仍存在' : ''}`
-        : '仅参与讨论，未见明确购买需求'),
+      `${verdict} · ${evidence.map((e) => e.label).join(' · ')}${ageDays !== null && ageDays > 30 ? ' · 较早信息，需人工确认需求是否仍存在' : ''}`,
   };
 }
-export function toLead(c: Comment, note?: Note): Lead {
-  const assessment = assessComment(c, note);
+export function commentThread(c: Comment, comments: Comment[]) {
+  const scoped = comments.filter(
+    (x) =>
+      x.noteId === c.noteId &&
+      x.source === c.source &&
+      (!c.platform || !x.platform || c.platform === x.platform),
+  );
+  let root = c;
+  const seen = new Set([c.id]);
+  for (let i = 0; i < 8 && root.parentId; i++) {
+    const parent = scoped.find((x) => x.id === root.parentId);
+    if (!parent || seen.has(parent.id)) break;
+    seen.add(parent.id);
+    root = parent;
+  }
+  return { root, replies: scoped.filter((x) => x.parentId === root.id && x.id !== c.id) };
+}
+export function toLead(c: Comment, note?: Note, comments: Comment[] = []): Lead {
+  const assessment = assessComment(c, note, Date.now(), comments);
   return {
     id: `${c.source}:${c.authorId || c.id}:${c.noteId}`,
     commentId: c.id,
@@ -165,24 +249,85 @@ export function toLead(c: Comment, note?: Note): Lead {
     createdAt: new Date().toISOString(),
   };
 }
-export function assessComment(c: Comment, note?: Note, now = Date.now()) {
+export function assessComment(c: Comment, note?: Note, now = Date.now(), comments: Comment[] = []) {
+  const { root, replies } = commentThread(c, comments);
+  const authorReplies = replies.filter(
+    (x) => x.authorId === note?.authorId && Date.parse(x.createdAt) >= Date.parse(c.createdAt),
+  );
   const result = intentScore(
     c.body,
     c.createdAt,
-    note ? [note.title, note.body, ...note.tags].join('\n') : '',
+    [
+      note ? [note.title, note.body, ...note.tags].join('\n') : '',
+      root.id !== c.id ? root.body : '',
+      ...authorReplies.map((x) => x.body),
+    ].join('\n'),
     now,
   );
+  result.threadEvidence = [
+    ...(root.id !== c.id ? [{ commentId: root.id, role: '所属主评论', text: root.body }] : []),
+    ...authorReplies
+      .slice(0, 4)
+      .map((x) => ({ commentId: x.id, role: '作者回复（回复不等于已成交）', text: x.body })),
+  ];
   if (result.stage !== 'restricted' && c.authorId && c.authorId === note?.authorId) {
     const reason = '作品作者自己的评论或回复，不作为潜在购买客户';
     return {
       ...result,
       score: 0,
       stage: 'discussion' as const,
+      intentType: 'discussion' as const,
+      verdict: '作者回复',
       recommended: false,
       reason,
       exclusions: [...result.exclusions, reason],
     };
   }
+  if (
+    !result.exclusions.length &&
+    root.id !== c.id &&
+    /我也想要|我也要|同求|蹲一个|求同款/.test(c.body)
+  ) {
+    const parent = intentScore(root.body, root.createdAt, note?.title || '', now);
+    if (parent.intentType === 'purchase' && parent.recommended) {
+      result.intentType = 'purchase';
+      result.stage = 'demand';
+      result.verdict = '跟随主评论询问同款';
+      result.score = Math.min(99, 30 + 35 + 20);
+      if (result.ageDays === null) result.score = 40;
+      else if (result.ageDays > 30) result.score = 45;
+      result.recommended = result.score >= 50;
+      result.evidence.push({ label: '同一评论串的明确商品请求', excerpt: root.body, points: 55 });
+      result.limitations = ['商品指代来自所属主评论，仍需核实具体型号及购买计划'];
+      result.reason = `回复「${c.body}」承接主评论「${root.body}」，支持同款购买兴趣，未证实下单`;
+    }
+  }
+  if (
+    result.intentType === 'service' &&
+    authorReplies.length &&
+    replies.some(
+      (x) =>
+        x.authorId === c.authorId &&
+        Date.parse(x.createdAt) > Date.parse(c.createdAt) &&
+        /好的|谢谢|明白|收到/.test(x.body),
+    )
+  ) {
+    result.threadEvidence?.push(
+      ...replies
+        .filter(
+          (x) =>
+            x.authorId === c.authorId &&
+            Date.parse(x.createdAt) > Date.parse(c.createdAt) &&
+            /好的|谢谢|明白|收到/.test(x.body),
+        )
+        .map((x) => ({ commentId: x.id, role: '原评论者后续回应', text: x.body })),
+    );
+    result.recommended = false;
+    result.score = Math.min(result.score, 49);
+    result.reason = '已收到作者的具体改造建议并致谢，暂无继续委托或付费请求';
+    result.limitations?.push('只能确认曾咨询，不能认定仍需服务');
+  }
+  if (!result.exclusions.length && c.semantic) result.semantic = c.semantic;
   return result;
 }
 /** Sampling priority, not a lead score or an estimate of conversion. */
@@ -192,10 +337,10 @@ export function acquisitionPriority(note: Note, comments: Comment[], now = Date.
     return { tier: -1, weight: 0, reason: '敏感主题：仅作内容研究，不建立个人营销画像' };
   const sample = comments.filter((c) => c.noteId === note.id && c.source === note.source);
   const recent = sample.filter((c) => {
-    const a = assessComment(c, note, now);
-    return a.ageDays !== null && a.ageDays <= 7 && !a.exclusions.length && !!c.body.trim();
+    const a = assessComment(c, note, now, sample);
+    return a.withinSevenDays === true && !a.exclusions.length && !!c.body.trim();
   });
-  const needs = recent.filter((c) => assessComment(c, note, now).recommended);
+  const needs = recent.filter((c) => assessComment(c, note, now, sample).recommended);
   const people = new Set(needs.map((c) => c.authorId || c.id)).size;
   if (people)
     return {
