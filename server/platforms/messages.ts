@@ -1,4 +1,4 @@
-import { readDouyinTranscript } from './douyin-message-dom.ts';
+import { readDouyinTranscript, readDouyinThreads } from './douyin-message-dom.ts';
 import { xhsMessageDirection, douyinPeer } from './message-identity.ts';
 import { z } from 'zod';
 import type { Page } from 'playwright';
@@ -217,35 +217,7 @@ async function dyList(page: Page, accountId: string): Promise<NativeInbox['threa
       .catch(() => false))
   )
     await page.getByText('消息', { exact: true }).first().click();
-  await page.locator('[data-stack-layer="list"]').waitFor({ timeout: 15000 });
-  const rows = await page.locator('[data-e2e="conversation-item"]').evaluateAll((ns) =>
-    ns.map((n) => {
-      const key = Object.keys(n).find((k) => k.startsWith('__reactFiber'));
-      let f = key ? (n as any)[key] : null;
-      let model: any;
-      for (let i = 0; f && i < 12; i++, f = f.return) {
-        if (f.memoizedProps?.conversation) {
-          model = f.memoizedProps.conversation;
-          break;
-        }
-      }
-      return {
-        nativeId: String(model?.id || ''),
-        peerId: String(model?.toParticipantSecUserId || ''),
-        name: n.querySelector('.conversationConversationItemtitle')?.textContent || '',
-        preview: n.querySelector('.ConversationItemHinttextBox')?.textContent || '',
-        timeLabel: n.querySelector('.ConversationItemTagNextToTitletimeStr')?.textContent || '',
-      };
-    }),
-  );
-  for (const r of rows) {
-    douyinPeer(r.nativeId, accountId);
-    if (!/^MS4w[A-Za-z0-9_-]+$/.test(r.peerId || ''))
-      throw new Error('抖音用户标识不可验证，请重新同步');
-  }
-  if (new Set(rows.map((r) => r.nativeId)).size !== rows.length)
-    throw new Error('抖音会话身份不唯一');
-  return rows;
+  return readDouyinThreads(page, accountId);
 }
 async function dyRead(page: Page, accountId: string, nativeId: string): Promise<InboxMessage[]> {
   douyinPeer(nativeId, accountId);
@@ -260,6 +232,10 @@ async function dyRead(page: Page, accountId: string, nativeId: string): Promise<
   await page
     .locator('.StackLayoutStackLayoutV2stackLayerLeaving')
     .waitFor({ state: 'detached', timeout: 10000 });
+  await page
+    .locator('[data-e2e="conversation-item"]')
+    .first()
+    .waitFor({ state: 'attached', timeout: 15000 });
   const rows = await dyList(page, accountId);
   const index = rows.findIndex((r) => r.nativeId === nativeId);
   if (index < 0) throw new Error('抖音当前已加载列表没有此会话，请先同步列表');
@@ -300,6 +276,7 @@ async function dyMessaging(args: z.infer<typeof operationSchema>): Promise<Nativ
   if (args.operation === 'list') return result;
   if (!args.nativeId) throw new Error('请选择具体会话');
   const messages = await dyRead(page, accountId, args.nativeId);
+  result.threads = await dyList(page, accountId);
   result.selected = { nativeId: args.nativeId, messages };
   if (args.operation !== 'send') return result;
   if (!args.text || !args.expectedHash || transcriptHash(messages) !== args.expectedHash)

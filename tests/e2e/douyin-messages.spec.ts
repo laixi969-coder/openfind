@@ -58,3 +58,24 @@ test('Douyin missing inbound identity, inconsistent sender markers and duplicate
   ]);
   await expect(readDouyinTranscript(page, '123', '0:1:123:456')).rejects.toThrow(/标识重复/);
 });
+
+test('Restored Douyin chat can read hidden list metadata without clicking through the chat layer', async ({
+  page,
+}) => {
+  const { readDouyinThreads } = await import('../../server/platforms/douyin-message-dom');
+  await page.setContent(
+    '<div data-stack-layer="list" style="display:none"><div data-e2e="conversation-item"><div class="conversationConversationItemtitle">controlled test</div></div></div><div data-stack-layer="chat">restored chat</div>',
+  );
+  await page.locator('[data-e2e="conversation-item"]').evaluate((n) => {
+    (n as any).__reactFiber_test = {
+      memoizedProps: {
+        conversation: { id: '0:1:123:456', toParticipantSecUserId: 'MS4wSyntheticPeer' },
+      },
+    };
+  });
+  const rows = await readDouyinThreads(page, '123');
+  expect(rows).toHaveLength(1);
+  expect(rows[0].nativeId).toBe('0:1:123:456');
+  await expect(page.locator('[data-stack-layer="list"]')).toBeHidden();
+  await expect(page.locator('[data-stack-layer="chat"]')).toBeVisible();
+});
