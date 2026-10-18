@@ -312,3 +312,93 @@ test('Restart marks interrupted manual model reviews as stopped without losing c
   assert.equal(restored.reviewProgress!.reviewed, 5);
   assert.deepEqual(restored.commentIds, ['kept-comment']);
 });
+
+const linkedInput: AcquisitionInput = {
+  ...input,
+  keyword: '指定链接',
+  mode: 'live',
+  platform: 'douyin',
+  links: [
+    'https://www.douyin.com/video/7654321098765432101',
+    'https://www.douyin.com/video/7654321098765432102',
+  ],
+};
+function linkedNote(url: string): Note {
+  const id = url.split('/').at(-1)!;
+  return {
+    ...note('dy:' + id),
+    nativeId: id,
+    url,
+    source: 'live',
+    title: '桌面花瓶',
+    body: '花瓶款式',
+    comments: 0,
+    commentCountKnown: true,
+  };
+}
+test('Link pipeline reads only specified works including zero-count works and performs no keyword search', async () => {
+  configSet('protection:douyin', JSON.stringify(freshProtection()));
+  const w = createWorkflow(linkedInput);
+  const calls: string[] = [];
+  await runWorkflow(
+    w,
+    async (j) => {
+      assert.equal(j.type, 'comments');
+      calls.push(j.noteId!);
+      const n = get<Note>('notes', j.noteId!)!;
+      const c = { ...comment(n, 'linked-' + n.nativeId), source: 'live' as const };
+      put('comments', c);
+      j.resultIds = [c.id];
+      j.status = 'completed';
+      put('jobs', j);
+    },
+    async (url) => linkedNote(url),
+  );
+  assert.equal(w.status, 'completed');
+  assert.deepEqual(
+    calls,
+    linkedInput.links!.map((u) => linkedNote(u).id),
+  );
+  assert.equal(w.searchJobIds.length, 0);
+  assert.equal(w.noteIds.length, 2);
+  assert.equal(w.leadIds.length, 2);
+});
+test('Link resolution resumes its checkpoint without rereading completed works', async () => {
+  const w = createWorkflow(linkedInput);
+  const read: string[] = [];
+  let fail = true;
+  const resolve = async (url: string) => {
+    read.push(url);
+    if (url === linkedInput.links![1] && fail) throw Error('平台要求本人安全验证');
+    return linkedNote(url);
+  };
+  const execute: Parameters<typeof runWorkflow>[1] = async (j) => {
+    j.status = 'completed';
+    put('jobs', j);
+  };
+  await runWorkflow(w, execute, resolve);
+  assert.equal(w.status, 'paused');
+  assert.equal(Object.keys(w.linkNoteIds!).length, 1);
+  fail = false;
+  await runWorkflow(w, execute, resolve);
+  assert.equal(w.status, 'completed');
+  assert.deepEqual(read, [linkedInput.links![0], linkedInput.links![1], linkedInput.links![1]]);
+});
+test('Mismatched work identity and sensitive target pages stop before comments or lead creation', async () => {
+  for (const sensitive of [false, true]) {
+    const w = createWorkflow({ ...linkedInput, links: linkedInput.links!.slice(0, 1) });
+    let comments = 0;
+    await runWorkflow(
+      w,
+      async () => {
+        comments++;
+      },
+      async (url) =>
+        sensitive ? { ...linkedNote(url), title: 'HPV治疗' } : linkedNote(linkedInput.links![1]),
+    );
+    assert.equal(w.status, 'paused');
+    assert.equal(comments, 0);
+    assert.equal(w.leadIds.length, 0);
+    assert.match(w.message, sensitive ? /敏感主题/ : /身份不一致/);
+  }
+});

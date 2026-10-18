@@ -1,3 +1,4 @@
+import { openDouyinComments } from './comment-panel.ts';
 import { chromium, type BrowserContext, type Page, type Response } from 'playwright';
 import { directProxy, closeNetwork, allowNetworkRequest } from './network.ts';
 import { randomUUID } from 'node:crypto';
@@ -675,10 +676,7 @@ export async function browserComments(
     attachRead(run);
     await page.goto(input.note.url, { waitUntil: 'domcontentloaded', timeout: 45_000 });
     await page.bringToFront();
-    if (platform === 'douyin') {
-      const button = page.locator('[data-e2e="comment-icon"], [data-e2e="comment-count"]').first();
-      if (await button.isVisible().catch(() => false)) await button.click();
-    }
+    if (platform === 'douyin') await openDouyinComments(page);
   }
   return collectPage(run, signal);
 }

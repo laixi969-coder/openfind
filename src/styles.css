@@ -4882,3 +4882,25 @@ blockquote {
   line-height: 1.65;
   overflow-wrap: anywhere;
 }
+
+.acquisition-link-input {
+  flex-direction: column;
+  align-items: stretch;
+  min-width: 0;
+}
+.acquisition-link-input textarea {
+  width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.acquisition-link-input > span {
+  overflow-wrap: anywhere;
+}
+.acquisition-fields.links {
+  grid-template-columns: minmax(0, 1fr);
+  max-width: 220px;
+}
+.acquisition-actions > .btn {
+  max-width: 100%;
+  white-space: normal;
+}

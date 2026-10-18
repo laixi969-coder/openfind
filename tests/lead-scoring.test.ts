@@ -34,7 +34,7 @@ test('Sensitive context prevents individual marketing profiles even for neutral 
 });
 
 test('Colloquial purchase questions qualify while denials and seller answers do not', () => {
-  for (const body of ['地毯有链接吗', '沙发好看，在哪买的'])
+  for (const body of ['地毯有链接吗', '紫色四件套有链接嘛', '沙发好看，在哪买的'])
     assert.equal(intentScore(body, when(0), '', now).recommended, true, body);
   for (const body of ['不想买，只是看看', '有的亲，关注我，发给你链接哈', ''])
     assert.equal(intentScore(body, when(0), '', now).recommended, false, body);

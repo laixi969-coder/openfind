@@ -17,6 +17,7 @@ import { demoNotes, demoComments } from './demo.ts';
 import { parseIntent, toLead, assessComment, intentScore } from './domain.ts';
 import { providerCall, schemas, setSessionCookie, hasCookie, getCookie } from './provider.ts';
 import { browserCall, browserScreenshot } from './platforms/client.ts';
+import { parseWorkLinks } from '../shared/work-links.ts';
 import {
   reservePlatformAction,
   recordPlatformFailure,
@@ -385,6 +386,58 @@ const acquisitionSchema = z.object({
   commentLimit: z.number().int().min(1).max(50).default(20),
   supplement: z.boolean().default(true),
 });
+async function resolveWorkflowWork(
+  url: string,
+  platform: 'xiaohongshu' | 'douyin',
+  signal: AbortSignal,
+) {
+  reservePlatformAction(platform, 'search');
+  try {
+    const note = await browserCall<Note>('/resolve-work', { url, platform }, signal);
+    recordPlatformSuccess(platform);
+    return note;
+  } catch (e) {
+    if (!signal.aborted && !(e instanceof ProtectionError))
+      recordPlatformFailure(platform, (e as Error).message);
+    throw e;
+  }
+}
+app.post('/api/workflows/links', (req, res) => {
+  const input = z
+    .object({
+      content: z.string().trim().min(1).max(12000),
+      commentLimit: z.number().int().min(1).max(50).default(20),
+    })
+    .strict()
+    .parse(req.body);
+  let links: ReturnType<typeof parseWorkLinks>;
+  try {
+    links = parseWorkLinks(input.content);
+  } catch (e) {
+    res.status(400).json({ error: (e as Error).message });
+    return;
+  }
+  if (active() || publishing.size) {
+    res.status(409).json({ error: '已有任务运行，请先暂停或等待完成' });
+    return;
+  }
+  if (settings().connectionType !== 'browser') {
+    res.status(400).json({ error: '链接获客需要内置平台浏览器，请在连接设置切换连接方式' });
+    return;
+  }
+  const w = createWorkflow({
+    keyword: `指定链接（${links.length}篇）`,
+    links: links.map((l) => l.url),
+    platform: links[0].platform,
+    mode: 'live',
+    searchLimit: 1,
+    maxNotes: links.length,
+    commentLimit: input.commentLimit,
+    supplement: false,
+  });
+  void runWorkflow(w, runJob, resolveWorkflowWork);
+  res.status(201).json(w);
+});
 app.post('/api/workflows', (req, res) => {
   const input = acquisitionSchema.parse(req.body);
   if (active() || publishing.size) {
@@ -443,7 +496,7 @@ app.post('/api/workflows/:id/:action', (req, res) => {
       res.status(409).json({ error: '请等待当前任务结束；只有暂停的流程可以继续' });
       return;
     }
-    void runWorkflow(w, runJob);
+    void runWorkflow(w, runJob, resolveWorkflowWork);
   } else {
     res.status(404).json({ error: '未知操作' });
     return;

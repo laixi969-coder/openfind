@@ -50,7 +50,7 @@ export function parseIntent(text: string) {
     explanation: `搜索「${keyword}」的${limit === 0 ? '全部' : limit + '篇'}${/视频/.test(text) ? '视频' : '作品'}，按${/热门|爆款|高互动|最火/.test(text) ? '热度' : /最新|最近/.test(text) ? '发布时间' : '相关性'}排序`,
   };
 }
-export const qualificationVersion = 'intent-rules-3.1';
+export const qualificationVersion = 'intent-rules-3.1.1';
 export function intentScore(
   body: string,
   createdAt = '',
@@ -93,7 +93,7 @@ export function intentScore(
     );
   const seller = /加我|私我|看我主页|看主页|厂家直销|我这有|我家有|专业代办/.exec(text);
   const path =
-    /链接.{0,6}(?:给|发|分享)|(?:有|给|发).{0,4}链接(?:吗|么|[?？])|(?:求|蹲)个?链接|(?:在)?哪(?:里|儿)?买(?:的|到)?|怎么预约|如何预约|怎么买|想订|想下单|求联系方式|怎么联系|^.{0,16}链接[?？!！。]?$/.exec(
+    /链接.{0,6}(?:给|发|分享)|(?:有|给|发).{0,4}链接(?:吗|么|嘛|[?？])|(?:求|蹲)个?链接|(?:在)?哪(?:里|儿)?买(?:的|到)?|怎么预约|如何预约|怎么买|想订|想下单|求联系方式|怎么联系|^.{0,16}链接[?？!！。]?$/.exec(
       text,
     );
   const sharing =

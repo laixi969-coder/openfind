@@ -77,6 +77,21 @@ app.post('/comments', async (req, res) => {
   res.json(await browserComments(req.body, abort.signal));
 });
 app.post('/detail', async (req, res) => res.json(await readDetail(req.body.note as Note)));
+app.post('/resolve-work', async (req, res) => {
+  const input = z
+    .object({ url: z.string().max(2048), platform })
+    .strict()
+    .parse(req.body);
+  const abort = new AbortController();
+  res.on('close', () => {
+    if (!res.writableEnded) abort.abort();
+  });
+  const module = await import(
+    './platforms/links.ts?revision=' +
+      statSync(new URL('./platforms/links.ts', import.meta.url)).mtimeMs
+  );
+  res.json(await module.resolveWorkLink(input.url, input.platform, abort.signal));
+});
 app.post('/inspect', async (req, res) =>
   res.json(await inspectPlatform(platform.parse(req.body.platform))),
 );

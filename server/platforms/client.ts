@@ -4,6 +4,11 @@ export async function browserCall<T>(
   body?: unknown,
   signal?: AbortSignal,
 ): Promise<T> {
+  const timeoutMs = path.includes('publish')
+    ? 600_000
+    : path === '/resolve-work'
+      ? 150_000
+      : 90_000;
   const response = await fetch(
     `http://127.0.0.1:${process.env.OPENFIND_BROWSER_PORT || 8792}${path}`,
     {
@@ -14,11 +19,8 @@ export async function browserCall<T>(
       },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: signal
-        ? AbortSignal.any([
-            signal,
-            AbortSignal.timeout(path.includes('publish') ? 600_000 : 90_000),
-          ])
-        : AbortSignal.timeout(path.includes('publish') ? 600_000 : 90_000),
+        ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
+        : AbortSignal.timeout(timeoutMs),
     },
   ).catch((e: Error) => {
     if (signal?.aborted) throw e;

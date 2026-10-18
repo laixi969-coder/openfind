@@ -8,6 +8,7 @@ import { acquisitionPriority, assessComment } from '../../server/domain';
 import { useWorkspace } from '../context';
 import { api, downloadExport } from '../api';
 import { PageHeading, SourceTag } from './ui';
+import { parseWorkLinks, maxWorkLinks, type WorkLink } from '../../shared/work-links';
 
 const platformName = (p: Platform) => (p === 'douyin' ? '抖音' : '小红书');
 export function Acquisition() {
@@ -20,9 +21,22 @@ export function Acquisition() {
     initial?.input.platform || data.settings.platform || 'xiaohongshu',
   );
   const [keyword, setKeyword] = useState(initial?.input.keyword || '家居');
-  const [searchLimit, setSearchLimit] = useState(20);
-  const [maxNotes, setMaxNotes] = useState(3);
-  const [commentLimit, setCommentLimit] = useState(20);
+  const [inputSource, setInputSource] = useState<'search' | 'links'>(
+    initial?.input.links ? 'links' : 'search',
+  );
+  const [linkText, setLinkText] = useState(initial?.input.links?.join('\n') || '');
+  let workLinks: WorkLink[] = [];
+  let linkError = '';
+  if (linkText.trim()) {
+    try {
+      workLinks = parseWorkLinks(linkText);
+    } catch (e) {
+      linkError = (e as Error).message;
+    }
+  }
+  const [searchLimit, setSearchLimit] = useState(initial?.input.searchLimit ?? 20);
+  const [maxNotes, setMaxNotes] = useState(initial?.input.maxNotes ?? 3);
+  const [commentLimit, setCommentLimit] = useState(initial?.input.commentLimit ?? 20);
   const [supplement, setSupplement] = useState(true);
   const [busy, setBusy] = useState(false);
   const [reviewFilter, setReviewFilter] = useState('all');
@@ -46,18 +60,28 @@ export function Acquisition() {
   async function start() {
     setBusy(true);
     try {
-      const w = await api<AcquisitionWorkflow>('/workflows', {
-        keyword,
-        platform,
-        mode: data.settings.mode,
-        searchLimit,
-        maxNotes,
-        commentLimit,
-        supplement,
-      });
+      const w = await api<AcquisitionWorkflow>(
+        inputSource === 'links' ? '/workflows/links' : '/workflows',
+        inputSource === 'links'
+          ? { content: linkText, commentLimit }
+          : {
+              keyword,
+              platform,
+              mode: data.settings.mode,
+              searchLimit,
+              maxNotes,
+              commentLimit,
+              supplement,
+            },
+      );
       select(w.id);
+      setPlatform(w.input.platform);
       await refresh();
-      notify('流程已启动，搜索、评论采集和线索判断将依次执行');
+      notify(
+        inputSource === 'links'
+          ? '链接流程已启动，将读取指定作品、采集评论并判断线索'
+          : '流程已启动，搜索、评论采集和线索判断将依次执行',
+      );
     } catch (e) {
       notify((e as Error).message, true);
     } finally {
@@ -96,23 +120,47 @@ export function Acquisition() {
     }
   }
   const stages = ['search', 'comments', 'assess', 'done'];
-  const stageIndex = flow ? stages.indexOf(flow.stage) : -1;
+  const stageIndex = flow ? (flow.stage === 'resolve' ? 0 : stages.indexOf(flow.stage)) : -1;
   return (
     <>
       <PageHeading
         eyebrow="ONE-CLICK ACQUISITION"
         title="从搜索，到值得复核的需求。"
-        description="选好平台和关键词，自动搜索、挑选作品、采集评论并保存候选。结果与判断依据留在同一页。"
+        description="输入关键词或粘贴作品链接，采集评论并保存候选。结果与判断依据留在同一页。"
       />
-      <CollectionBudget platform={platform} />
+      <CollectionBudget
+        platform={inputSource === 'links' && workLinks.length ? workLinks[0].platform : platform}
+      />
       <section className="acquisition-setup" aria-label="一键获客设置">
+        <div className="acquisition-actions" role="group" aria-label="获客来源">
+          <button
+            type="button"
+            className={`btn ${inputSource === 'search' ? 'primary' : ''}`}
+            aria-pressed={inputSource === 'search'}
+            onClick={() => setInputSource('search')}
+          >
+            关键词搜索
+          </button>
+          <button
+            type="button"
+            className={`btn ${inputSource === 'links' ? 'primary' : ''}`}
+            aria-pressed={inputSource === 'links'}
+            onClick={() => setInputSource('links')}
+          >
+            粘贴作品链接
+          </button>
+        </div>
         <div className="acquisition-intro">
           <Workflow size={22} />
           <div>
-            <h2>组合获客流程</h2>
-            <p>最新作品为主 · 近期需求优先 · 相关与高互动补充</p>
+            <h2>{inputSource === 'links' ? '指定链接获客' : '组合获客流程'}</h2>
+            <p>
+              {inputSource === 'links'
+                ? '只读取指定作品 · 逐条采集评论 · 近期明确需求优先'
+                : '最新作品为主 · 近期需求优先 · 相关与高互动补充'}
+            </p>
           </div>
-          <SourceTag source={data.settings.mode} />
+          <SourceTag source={inputSource === 'links' ? 'live' : data.settings.mode} />
         </div>
         <form
           onSubmit={(e) => {
@@ -120,53 +168,86 @@ export function Acquisition() {
             void start();
           }}
         >
-          <div className="acquisition-fields">
-            <label>
-              获客平台
-              <select
-                aria-label="获客平台"
-                value={platform}
-                onChange={(e) => setPlatform(e.target.value as Platform)}
-              >
-                <option value="xiaohongshu">小红书</option>
-                <option value="douyin">抖音</option>
-              </select>
-            </label>
-            <label className="acquisition-keyword">
-              产品或场景关键词
-              <input
+          {inputSource === 'links' && (
+            <label className="field-label acquisition-link-input">
+              作品链接或 App 分享文案
+              <textarea
+                aria-label="作品链接"
+                rows={5}
+                maxLength={12000}
                 required
-                maxLength={100}
-                aria-label="获客关键词"
-                value={keyword}
-                onChange={(e) => setKeyword(e.target.value)}
-                placeholder="例如：小户型沙发"
+                value={linkText}
+                onChange={(e) => setLinkText(e.target.value)}
+                placeholder={'粘贴小红书或抖音作品链接，可一行一条，也可以粘贴完整分享文案'}
               />
+              <span className="field-hint">
+                推荐一次 3 条，最多 {maxWorkLinks}{' '}
+                条同平台作品。支持官方长链接和分享短链接，重复作品自动合并；两个平台请分批执行。
+              </span>
+              {linkError && (
+                <span className="inline-error" role="alert">
+                  {linkError}
+                </span>
+              )}
+              {!!workLinks.length && (
+                <span className="field-hint" role="status">
+                  已识别：{platformName(workLinks[0].platform)} · {workLinks.length} 条作品链接 ·
+                  使用真实账号读取
+                </span>
+              )}
             </label>
-            <label>
-              每次搜索作品数
-              <input
-                aria-label="每次搜索作品数"
-                type="number"
-                min={1}
-                max={40}
-                required
-                value={searchLimit}
-                onChange={(e) => setSearchLimit(Number(e.target.value))}
-              />
-            </label>
-            <label>
-              最多采样作品数
-              <input
-                aria-label="最多采样作品数"
-                type="number"
-                min={1}
-                max={5}
-                required
-                value={maxNotes}
-                onChange={(e) => setMaxNotes(Number(e.target.value))}
-              />
-            </label>
+          )}
+          <div className={`acquisition-fields ${inputSource === 'links' ? 'links' : ''}`}>
+            {inputSource === 'search' && (
+              <>
+                <label>
+                  获客平台
+                  <select
+                    aria-label="获客平台"
+                    value={platform}
+                    onChange={(e) => setPlatform(e.target.value as Platform)}
+                  >
+                    <option value="xiaohongshu">小红书</option>
+                    <option value="douyin">抖音</option>
+                  </select>
+                </label>
+                <label className="acquisition-keyword">
+                  产品或场景关键词
+                  <input
+                    required
+                    maxLength={100}
+                    aria-label="获客关键词"
+                    value={keyword}
+                    onChange={(e) => setKeyword(e.target.value)}
+                    placeholder="例如：小户型沙发"
+                  />
+                </label>
+                <label>
+                  每次搜索作品数
+                  <input
+                    aria-label="每次搜索作品数"
+                    type="number"
+                    min={1}
+                    max={40}
+                    required
+                    value={searchLimit}
+                    onChange={(e) => setSearchLimit(Number(e.target.value))}
+                  />
+                </label>
+                <label>
+                  最多采样作品数
+                  <input
+                    aria-label="最多采样作品数"
+                    type="number"
+                    min={1}
+                    max={5}
+                    required
+                    value={maxNotes}
+                    onChange={(e) => setMaxNotes(Number(e.target.value))}
+                  />
+                </label>
+              </>
+            )}
             <label>
               每篇评论上限
               <input
@@ -181,22 +262,34 @@ export function Acquisition() {
             </label>
           </div>
           <div className="acquisition-actions">
-            <label>
-              <input
-                type="checkbox"
-                checked={supplement}
-                onChange={(e) => setSupplement(e.target.checked)}
-              />
-              作品不足时补充相关、高互动搜索（遵守剩余额度）
-            </label>
-            <button className="btn primary" disabled={busy || active || !keyword.trim()}>
+            {inputSource === 'search' && (
+              <label>
+                <input
+                  type="checkbox"
+                  checked={supplement}
+                  onChange={(e) => setSupplement(e.target.checked)}
+                />
+                作品不足时补充相关、高互动搜索（遵守剩余额度）
+              </label>
+            )}
+            <button
+              className="btn primary"
+              disabled={
+                busy ||
+                active ||
+                (inputSource === 'links' ? !!linkError || !workLinks.length : !keyword.trim())
+              }
+            >
               <Play size={15} />
-              一键执行获客
+              {inputSource === 'links' ? '从链接一键获客' : '一键执行获客'}
             </button>
           </div>
         </form>
         <p className="field-hint">
-          默认最多采样3篇，每篇20条评论。仅将近7天明确需求保存为候选，仍需核对产品与地区匹配；不自动发送消息。登录、验证、额度或连接问题会暂停并保留进度。
+          {inputSource === 'links'
+            ? '链接获客默认每篇20条、最多50条评论；作品读取每篇占用1个本地搜索/作品读取批次，评论按实际采集批次计数。'
+            : '默认最多采样3篇，每篇20条评论。'}
+          仅将近7天明确需求保存为候选，仍需核对产品与地区匹配；不自动发送消息。登录、验证、额度或连接问题会暂停并保留进度。
         </p>
       </section>
       <section className="acquisition-results" aria-label="流程结果">
@@ -215,7 +308,7 @@ export function Acquisition() {
         </div>
         {!flow ? (
           <p className="acquisition-empty">
-            填写关键词并一键执行。作品、评论和候选线索会逐步出现在这里，刷新页面也能继续查看。
+            输入关键词或粘贴作品链接后执行。作品、评论和候选线索会逐步出现在这里，刷新页面也能继续查看。
           </p>
         ) : (
           <>
@@ -264,7 +357,12 @@ export function Acquisition() {
               )}
             </div>
             <ol className="acquisition-steps">
-              {['搜索与选样', '评论采集', '线索判断', '结果保存'].map((label, i) => (
+              {[
+                flow.input.links ? '链接读取' : '搜索与选样',
+                '评论采集',
+                '线索判断',
+                '结果保存',
+              ].map((label, i) => (
                 <li
                   key={label}
                   className={
@@ -301,7 +399,10 @@ export function Acquisition() {
               </p>
             )}
             <p className="field-hint">
-              候选作品包含本次搜索及同平台、同关键词的历史发现；评论与线索只统计本流程读取或有效缓存复用的结果。
+              {flow.input.links
+                ? '作品范围仅包含本次指定链接，不追加搜索结果或历史作品；'
+                : '候选作品包含本次搜索及同平台、同关键词的历史发现；'}
+              评论与线索只统计本流程读取或有效缓存复用的结果。
             </p>
             <div className="acquisition-metrics">
               {[
@@ -433,7 +534,21 @@ export function Acquisition() {
                           ? new Date(n.publishedAt).toLocaleDateString()
                           : '日期待核实'}
                       </small>
-                      <p>{acquisitionPriority(n, data.comments).reason}</p>
+                      <p>
+                        {flow.input.links
+                          ? '由你指定的作品，按链接逐篇采集，不受热门度选样影响。'
+                          : acquisitionPriority(n, data.comments).reason}
+                      </p>
+                      {flow.input.links && (
+                        <a
+                          className="text-btn"
+                          href={n.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          打开原作品
+                        </a>
+                      )}
                     </div>
                     <button
                       className="btn"

@@ -174,6 +174,7 @@ export interface Snapshot {
   settings: Settings;
 }
 export interface AcquisitionInput {
+  links?: string[];
   keyword: string;
   platform: Platform;
   mode: Mode;
@@ -253,7 +254,8 @@ export interface AcquisitionWorkflow {
   id: string;
   input: AcquisitionInput;
   status: 'running' | 'paused' | 'completed';
-  stage: 'search' | 'comments' | 'assess' | 'done';
+  stage: 'resolve' | 'search' | 'comments' | 'assess' | 'done';
+  linkNoteIds?: Record<string, string>;
   searchIndex: number;
   searchJobIds: string[];
   noteIds: string[];

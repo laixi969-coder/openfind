@@ -21,6 +21,7 @@ import {
   qualificationVersion,
 } from './domain.ts';
 import { evaluateBudget, readInterval, protectionStatus } from './protection.ts';
+import { parseWorkLink, parseWorkLinks } from '../shared/work-links.ts';
 
 export const workflowRuns = new Map<string, AbortController>();
 export type JobExecutor = (
@@ -42,13 +43,20 @@ export function saveWorkflow(w: AcquisitionWorkflow, message?: string) {
   put('workflows', w);
 }
 export function createWorkflow(input: AcquisitionInput): AcquisitionWorkflow {
+  if (input.links) {
+    const links = parseWorkLinks(input.links.join('\n'));
+    if (input.mode !== 'live' || links[0].platform !== input.platform)
+      throw new Error('链接获客必须使用对应平台的真实模式');
+    input = { ...input, links: links.map((l) => l.url), maxNotes: links.length, supplement: false };
+  }
   if (intentScore('', '', input.keyword).stage === 'restricted')
     throw new Error('此关键词涉及敏感主题，请使用发现作品进行内容研究，不执行个人营销线索流程');
   const w: AcquisitionWorkflow = {
     id: randomUUID(),
     input,
     status: 'running',
-    stage: 'search',
+    stage: input.links ? 'resolve' : 'search',
+    ...(input.links ? { linkNoteIds: {} } : {}),
     searchIndex: 0,
     searchJobIds: [],
     noteIds: [],
@@ -61,7 +69,12 @@ export function createWorkflow(input: AcquisitionInput): AcquisitionWorkflow {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
-  saveWorkflow(w, '一键流程开始：最新作品 → 活跃评论选样 → 近7天需求判断 → 保存候选');
+  saveWorkflow(
+    w,
+    input.links
+      ? `链接流程开始：读取 ${input.links.length} 篇指定作品 → 评论采集 → 近7天需求判断 → 保存候选`
+      : '一键流程开始：最新作品 → 活跃评论选样 → 近7天需求判断 → 保存候选',
+  );
   return w;
 }
 export function recoverWorkflows() {
@@ -234,7 +247,16 @@ async function waitForPlatform(
     await delay(ms, undefined, { signal });
   }
 }
-export async function runWorkflow(w: AcquisitionWorkflow, execute: JobExecutor) {
+export type WorkResolver = (
+  url: string,
+  platform: AcquisitionInput['platform'],
+  signal: AbortSignal,
+) => Promise<Note>;
+export async function runWorkflow(
+  w: AcquisitionWorkflow,
+  execute: JobExecutor,
+  resolve?: WorkResolver,
+) {
   if (workflowRuns.has(w.id)) return;
   const abort = new AbortController();
   workflowRuns.set(w.id, abort);
@@ -305,6 +327,47 @@ export async function runWorkflow(w: AcquisitionWorkflow, execute: JobExecutor) 
     saveWorkflow(w);
   }
   try {
+    if (w.stage === 'resolve') {
+      if (!resolve || !w.input.links?.length)
+        throw new Error('链接读取服务不可用，请检查内置浏览器连接');
+      w.linkNoteIds ||= {};
+      for (const url of w.input.links) {
+        abort.signal.throwIfAborted();
+        const saved = w.linkNoteIds[url] && get<Note>('notes', w.linkNoteIds[url]);
+        if (saved && saved.platform === w.input.platform && saved.source === 'live') continue;
+        await waitForPlatform(w, 'search', abort.signal);
+        saveWorkflow(
+          w,
+          `正在读取指定作品 ${Object.keys(w.linkNoteIds).length + 1}/${w.input.links.length}`,
+        );
+        const link = parseWorkLink(url);
+        const note = await resolve(url, w.input.platform, abort.signal);
+        abort.signal.throwIfAborted();
+        const actual = parseWorkLink(note.url);
+        if (
+          note.source !== 'live' ||
+          note.platform !== w.input.platform ||
+          !note.nativeId ||
+          note.id !== (note.platform === 'douyin' ? 'dy:' : 'xhs:') + note.nativeId ||
+          actual.platform !== w.input.platform ||
+          actual.nativeId !== note.nativeId ||
+          (link.nativeId && link.nativeId !== note.nativeId)
+        )
+          throw new Error('指定链接与返回作品身份不一致，已停止采集');
+        if (intentScore('', '', note.title + '\n' + note.body).stage === 'restricted')
+          throw new Error('该作品涉及敏感主题，不执行个人营销线索流程；可在发现作品中进行内容研究');
+        put('notes', note);
+        w.linkNoteIds[url] = note.id;
+        w.noteIds = scopedNotes(w, [...w.noteIds, note.id]);
+        saveWorkflow(w, `已确认指定作品：${note.title}`);
+      }
+      w.selectedNoteIds = [...w.noteIds];
+      w.stage = 'comments';
+      saveWorkflow(
+        w,
+        `已确认 ${w.selectedNoteIds.length} 篇指定作品，开始逐篇采集评论，不执行关键词搜索或历史补充`,
+      );
+    }
     if (w.stage === 'search') {
       const sorts = ['latest', 'general', 'popular'] as const;
       while (w.searchIndex < sorts.length) {
