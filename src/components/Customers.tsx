@@ -669,7 +669,7 @@ export function Leads() {
               </thead>
               <tbody>
                 {leads.map((l) => (
-                  <tr key={l.id}>
+                  <tr key={l.id} data-lead-id={l.id}>
                     <td>
                       <div className="customer-cell">
                         <span className="author-avatar color-2">{l.name.slice(0, 1)}</span>

@@ -1,3 +1,4 @@
+import inboxRouter, { pollInbox } from './inbox.ts';
 import salesRouter from './sales.ts';
 import { llmSettings, saveLlmSettings, syncModels, testLlm, semanticFor } from './llm.ts';
 import express from 'express';
@@ -15,7 +16,7 @@ import { all, get, put, remove, configGet, configSet, encrypt } from './store.ts
 import { demoNotes, demoComments } from './demo.ts';
 import { parseIntent, toLead, assessComment, intentScore } from './domain.ts';
 import { providerCall, schemas, setSessionCookie, hasCookie, getCookie } from './provider.ts';
-import { browserCall } from './platforms/client.ts';
+import { browserCall, browserScreenshot } from './platforms/client.ts';
 import {
   reservePlatformAction,
   recordPlatformFailure,
@@ -578,6 +579,19 @@ app.post('/api/leads/collect', (req, res) => {
   res.json({ added, restricted });
 });
 app.use('/api', salesRouter);
+app.use('/api', inboxRouter);
+if (process.env.NODE_ENV !== 'test') {
+  let polling = false;
+  setInterval(() => {
+    if (polling) return;
+    polling = true;
+    void pollInbox()
+      .catch(() => {})
+      .finally(() => {
+        polling = false;
+      });
+  }, 60000).unref();
+}
 app.patch('/api/leads/:id', (req, res) => {
   const lead = get<Lead>('leads', String(req.params.id));
   if (!lead) {
@@ -975,6 +989,23 @@ app.get('/api/platforms', async (_req, res) => res.json(await browserCall('/conn
 app.post('/api/platforms/:platform/login', async (req, res) =>
   res.json(await browserCall('/login', { platform: platformEnum.parse(req.params.platform) })),
 );
+app.post('/api/platforms/:platform/login-preview', async (req, res) => {
+  const platform = platformEnum.parse(req.params.platform);
+  const connection = await browserCall<{ status: string; message: string }>('/status', {
+    platform,
+  });
+  if (connection.status === 'ready') {
+    res
+      .set('Cache-Control', 'no-store')
+      .json({ ready: true, message: '当前账号已验证登录，无需扫码' });
+    return;
+  }
+  if (req.body.refresh === true) await browserCall('/refresh', { platform });
+  res
+    .set('Cache-Control', 'no-store')
+    .type('png')
+    .send(await browserScreenshot(platform));
+});
 app.post('/api/platforms/:platform/creator', async (req, res) =>
   res.json(await browserCall('/creator', { platform: platformEnum.parse(req.params.platform) })),
 );

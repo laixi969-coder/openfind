@@ -16,6 +16,43 @@ import { Modal, Busy } from './ui';
 export const platformNames: Record<Platform, string> = { xiaohongshu: '小红书', douyin: '抖音' };
 export function PlatformConnections() {
   const { refresh, notify } = useWorkspace();
+  const [previewPlatform, setPreviewPlatform] = useState<Platform | null>(null);
+  const [previewUrl, setPreviewUrl] = useState('');
+  useEffect(
+    () => () => {
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+    },
+    [previewUrl],
+  );
+  async function showLogin(p: Platform, reload = false) {
+    setPreviewPlatform(p);
+    setBusy(p);
+    setPreviewUrl('');
+    try {
+      const response = await fetch(`/api/platforms/${p}/login-preview`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh: reload }),
+      });
+      if (!response.ok) throw new Error((await response.json()).error || '无法显示扫码页');
+      if (response.headers.get('content-type')?.includes('application/json')) {
+        const state = await response.json();
+        if (state.ready) {
+          setPreviewPlatform(null);
+          notify(state.message);
+          await update();
+          return;
+        }
+        throw new Error('官方页面尚未就绪');
+      }
+      setPreviewUrl(URL.createObjectURL(await response.blob()));
+      await update();
+    } catch (e) {
+      notify((e as Error).message, true);
+    } finally {
+      setBusy(null);
+    }
+  }
   const [connections, setConnections] = useState<PlatformConnection[]>([]),
     [protection, setProtection] = useState<
       Record<
@@ -168,6 +205,13 @@ export function PlatformConnections() {
               </label>
               <div className="native-platform-actions">
                 <button
+                  className="btn small"
+                  disabled={busy === p}
+                  onClick={() => void showLogin(p, true)}
+                >
+                  显示{platformNames[p]}扫码页
+                </button>
+                <button
                   className={`btn ${ready ? '' : 'primary'}`}
                   disabled={busy === p}
                   onClick={() => void open(p)}
@@ -202,6 +246,52 @@ export function PlatformConnections() {
           );
         })}
       </div>
+      {previewPlatform && (
+        <Modal
+          title={`${platformNames[previewPlatform]}官方登录页`}
+          wide
+          sub="这是本机专用浏览器的实时截图。请使用对应 App 扫码并在手机确认。验证码及协议须在官方浏览器中由本人处理。"
+          onClose={() => {
+            setPreviewPlatform(null);
+            setPreviewUrl('');
+          }}
+        >
+          {busy === previewPlatform ? (
+            <Busy text="正在读取官方页面" />
+          ) : previewUrl ? (
+            <img
+              src={previewUrl}
+              alt={`${platformNames[previewPlatform]}官方扫码登录页面`}
+              style={{ width: '100%' }}
+            />
+          ) : (
+            <p>未能读取官方登录页，请刷新或打开官方浏览器查看。</p>
+          )}
+          <div className="native-platform-actions">
+            <button
+              className="btn"
+              disabled={busy === previewPlatform}
+              onClick={() => void showLogin(previewPlatform, true)}
+            >
+              刷新二维码
+            </button>
+            <button
+              className="btn"
+              disabled={busy === previewPlatform}
+              onClick={() => void showLogin(previewPlatform)}
+            >
+              更新截图
+            </button>
+            <button
+              className="btn primary"
+              disabled={busy === previewPlatform}
+              onClick={() => void check(previewPlatform)}
+            >
+              我已扫码，检查登录
+            </button>
+          </div>
+        </Modal>
+      )}
       <div className="connection-footnote">
         真实采集每次最多100条，批次间隔遵循上方配置；验证、限流和连续失败会暂停。上述数值为本地保守限制，不是平台安全额度，也不能保证账号不受限制。不会自动切换账号重试或批量私信。
         <br />

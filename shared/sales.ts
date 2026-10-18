@@ -26,6 +26,13 @@ export const emptySalesProfile: SalesProfile = {
   proof: '',
 };
 export interface SalesEvent {
+  platformMessage?: {
+    platform: string;
+    accountId: string;
+    threadId: string;
+    messageId: string;
+    timeLabel: string;
+  };
   id: string;
   kind: 'outgoing' | 'incoming' | 'note' | 'quote' | 'order' | 'optout';
   channel: 'comment' | 'message' | 'other';

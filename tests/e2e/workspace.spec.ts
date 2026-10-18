@@ -258,12 +258,15 @@ test('sales workbench logs actual conversations, requires outcome evidence and p
   page,
 }) => {
   await page.goto('/#acquisition');
+  await expect(page.locator('.page-heading h1')).toBeVisible();
   if (!(await page.locator('.workflow-status').count())) {
     await page.getByRole('button', { name: '一键执行获客', exact: true }).click();
     await expect(page.locator('.workflow-status')).toHaveText('已完成');
   }
   await page.goto('/#leads');
-  await page.getByRole('button', { name: '查看与跟进', exact: true }).first().click();
+  const customer = page.locator('.lead-table tbody tr').first();
+  const leadId = await customer.getAttribute('data-lead-id');
+  await customer.getByRole('button', { name: '查看与跟进', exact: true }).click();
   const desk = page.getByRole('region', { name: '沟通成交工作台' });
   await expect(desk.getByText('先填写真实业务身份', { exact: false })).toBeVisible();
   await desk.getByText('真实业务资料 · 生成话术前填写', { exact: true }).click();
@@ -289,7 +292,10 @@ test('sales workbench logs actual conversations, requires outcome evidence and p
   await desk.getByRole('button', { name: '登记沟通记录', exact: true }).click();
   await expect(desk.getByText('对方已拒绝联系：', { exact: false })).toBeVisible();
   await page.reload();
-  await page.getByRole('button', { name: '查看与跟进', exact: true }).first().click();
+  await page
+    .locator(`[data-lead-id="${leadId}"]`)
+    .getByRole('button', { name: '查看与跟进', exact: true })
+    .click();
   await expect(
     page.getByRole('region', { name: '沟通成交工作台' }).getByLabel('销售阶段', { exact: true }),
   ).toHaveValue('lost');

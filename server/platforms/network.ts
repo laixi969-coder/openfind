@@ -56,7 +56,7 @@ function publicIPv4(ip: string) {
   );
 }
 
-async function resolveHost(host: string) {
+export async function resolvePublicHost(host: string) {
   const known = cache.get(host);
   if (known && known.expires > Date.now()) return known.ips;
   if (net.isIP(host)) {
@@ -79,7 +79,7 @@ async function resolveHost(host: string) {
 }
 
 async function connect(host: string, port: number): Promise<net.Socket> {
-  const ips = await resolveHost(host);
+  const ips = await resolvePublicHost(host);
   let last: unknown;
   for (const ip of ips.slice(0, 4)) {
     try {

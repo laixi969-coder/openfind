@@ -401,7 +401,11 @@ export function SalesWorkbench({
                         ? '评论'
                         : '其他渠道'}
                   </b>
-                  <small>{new Date(e.createdAt).toLocaleString()}</small>
+                  <small>
+                    {e.platformMessage
+                      ? `平台时间：${e.platformMessage.timeLabel || '未知'} · 同步于 ${new Date(e.createdAt).toLocaleString()}`
+                      : new Date(e.createdAt).toLocaleString()}
+                  </small>
                   <p>{e.content}</p>
                 </article>
               ))}

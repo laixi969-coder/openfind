@@ -1,3 +1,4 @@
+import { Inbox } from './components/Inbox';
 import { useCallback, useEffect, useState } from 'react';
 import {
   Search,
@@ -34,6 +35,7 @@ const navs: { id: Page; name: string; icon: typeof Search }[] = [
   { id: 'discover', name: '发现作品', icon: Compass },
   { id: 'comments', name: '客户采集', icon: MessageSquareText },
   { id: 'leads', name: '客户线索', icon: Users },
+  { id: 'inbox', name: '私信工作台', icon: MessageSquareText },
   { id: 'studio', name: '内容工作室', icon: PenLine },
   { id: 'history', name: '任务记录', icon: History },
 ];
@@ -282,6 +284,7 @@ export default function App() {
             {page === 'discover' && <Discover />}
             {page === 'comments' && <Comments />}
             {page === 'leads' && <Leads />}
+            {page === 'inbox' && <Inbox />}
             {page === 'studio' && <Studio />}
             {page === 'history' && <HistoryPage />}
             {page === 'settings' && <SettingsPage />}

@@ -43,9 +43,25 @@ app.post('/login', async (req, res) => {
 app.post('/status', async (req, res) =>
   res.json(await checkLogin(platform.parse(req.body.platform))),
 );
-app.post('/screenshot', async (req, res) =>
-  res.type('png').send(await loginScreenshot(platform.parse(req.body.platform))),
-);
+app.post('/messaging', async (req, res) => {
+  const module = await import(
+    './platforms/messages.ts?revision=' +
+      statSync(new URL('./platforms/messages.ts', import.meta.url)).mtimeMs
+  );
+  res.json(await module.messaging(req.body));
+});
+app.post('/screenshot', async (req, res) => {
+  const p = platform.parse(req.body.platform);
+  const bytes = req.body.loginOnly
+    ? await (
+        await import(
+          './platforms/messages.ts?revision=' +
+            statSync(new URL('./platforms/messages.ts', import.meta.url)).mtimeMs
+        )
+      ).loginPreview(p)
+    : await loginScreenshot(p);
+  res.set('Cache-Control', 'no-store').type('png').send(bytes);
+});
 app.post('/search', async (req, res) => {
   const abort = new AbortController();
   res.on('close', () => {

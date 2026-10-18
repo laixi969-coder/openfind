@@ -12,7 +12,7 @@ import {
 const router = Router();
 const identity = (lead: Lead) =>
   `${lead.source}:${lead.platform || get<Note>('notes', lead.noteId)?.platform || 'xiaohongshu'}:${lead.authorId || lead.id}`;
-function readCase(id: string) {
+export function readCase(id: string) {
   const record = get<SalesCase>('salesCases', id) || emptySalesCase(id);
   const lead = get<Lead>('leads', id)!;
   const duplicates = all<Lead>('leads').filter((other) => identity(other) === identity(lead));
@@ -36,7 +36,7 @@ function readCase(id: string) {
       : {}),
   };
 }
-function restricted(id: string) {
+export function restricted(id: string) {
   const lead = get<Lead>('leads', id)!;
   const comment = get<Comment>('comments', lead.commentId);
   return comment

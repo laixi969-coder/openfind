@@ -39,7 +39,9 @@ export function Acquisition() {
   const currentJob = data.jobs.find((j) => j.id === flow?.currentJobId);
   function select(id: string) {
     setFlowId(id);
-    history.replaceState(null, '', `?workflow=${encodeURIComponent(id)}#acquisition`);
+    // A pending creation request may finish after the user has left this page.
+    if (location.hash === '#acquisition')
+      history.replaceState(null, '', `?workflow=${encodeURIComponent(id)}#acquisition`);
   }
   async function start() {
     setBusy(true);

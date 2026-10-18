@@ -1,7 +1,7 @@
 import { createContext, useContext } from 'react';
 import type { Snapshot, Note, Draft } from '../shared/types';
 export type Page =
-  'acquisition' | 'discover' | 'comments' | 'leads' | 'studio' | 'history' | 'settings';
+  'acquisition' | 'discover' | 'comments' | 'leads' | 'studio' | 'history' | 'settings' | 'inbox';
 export interface Workspace {
   data: Snapshot;
   refresh: () => Promise<void>;
