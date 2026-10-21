@@ -137,6 +137,11 @@ test('a response arriving after cancellation cannot append results', async () =>
   assert.equal(j.status, 'stopped');
   assert.equal(j.pages, 0);
   assert.deepEqual(j.resultIds, []);
+  await runJob(get<Job>('jobs', j.id)!, query);
+  const restored = get<Job>('jobs', j.id)!;
+  assert.equal(restored.status, 'failed');
+  assert.match(restored.error!, /阻止自动重发/);
+  assert.deepEqual(cursors, [null]);
 });
 
 test('changing provider identity blocks resume before contacting the new provider', async () => {
@@ -171,4 +176,48 @@ test('provider changes also block a job interrupted before its first checkpoint'
   assert.equal(j.status, 'failed');
   assert.match(j.error!, /数据源或账号已改变/);
   assert.deepEqual(cursors, []);
+});
+
+test('same job cannot execute concurrently or overwrite the active controller', async () => {
+  reset();
+  mode = 'late';
+  requestReceived = new Promise((r) => {
+    received = r;
+  });
+  responseRelease = new Promise((r) => {
+    release = r;
+  });
+  const j = job('concurrent-runner');
+  const first = runJob(j, { ...query, limit: 1 });
+  await requestReceived;
+  await runJob(structuredClone(j), { ...query, limit: 1 });
+  release();
+  await first;
+  assert.equal(j.status, 'completed');
+  assert.equal(j.pages, 1);
+  assert.deepEqual(cursors, [null]);
+});
+
+test('failed page commit recovers its persisted response without another request', async () => {
+  reset();
+  mode = 'normal';
+  const j = job('failed-page-commit');
+  db.exec(
+    "CREATE TRIGGER reject_page BEFORE INSERT ON entities WHEN NEW.kind='notes' BEGIN SELECT RAISE(ABORT, 'disk simulation'); END",
+  );
+  try {
+    await runJob(j, { ...query, limit: 1 });
+    assert.equal(j.status, 'failed');
+    assert.equal(j.pages, 0);
+    assert.deepEqual(cursors, [null]);
+  } finally {
+    db.exec('DROP TRIGGER reject_page');
+  }
+  // No reset of platform quota: recovery must not reserve a second action.
+  await runJob(get<Job>('jobs', j.id)!, { ...query, limit: 1 });
+  const restored = get<Job>('jobs', j.id)!;
+  assert.equal(restored.status, 'completed');
+  assert.equal(restored.count, 1);
+  assert.equal(restored.pages, 1);
+  assert.deepEqual(cursors, [null]);
 });

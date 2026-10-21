@@ -194,3 +194,76 @@ test('local cancellation or exhausted budget cannot create a false uncertain pai
   assert.equal(requests, 1);
   assert.ok(!all<any>('xhs-api-tasks').some((t) => t.id.includes('never-submitted')));
 });
+
+test('RedFox recovers a received submission after taskId persistence fails without resubmitting', async () => {
+  saveXhsSettings({ provider: 'redfox', apiKey: 'recover-submit', maxRequests: 5 });
+  const n = { ...note, id: 'xhs:recover-submission', nativeId: 'recover-submission' };
+  let submits = 0;
+  const transport = mock((u) => {
+    if (u.pathname.endsWith('commentSubmit')) {
+      submits++;
+      return { code: 2000, data: { taskId: 'recover-task' } };
+    }
+    return { code: 2000, data: { status: 'completed', commentList: [] } };
+  });
+  db.exec(
+    "CREATE TRIGGER fail_task_id BEFORE UPDATE ON entities WHEN NEW.kind='xhs-api-tasks' BEGIN SELECT RAISE(ABORT, 'task write failed'); END",
+  );
+  try {
+    await assert.rejects(
+      xhsClient(undefined, transport).comments(n, 20, null),
+      /task write failed/,
+    );
+  } finally {
+    db.exec('DROP TRIGGER fail_task_id');
+  }
+  const recovered = xhsClient(undefined, transport);
+  await assert.rejects(recovered.comments(n, 20, null), /recover-task/);
+  assert.equal(recovered.requests, 0);
+  assert.equal(submits, 1);
+  assert.deepEqual(await recovered.comments(n, 20, null), { items: [], nextCursor: null });
+  assert.equal(submits, 1);
+});
+
+test('journaled RedFox polling can advance after a definitive processing response', async () => {
+  saveXhsSettings({ provider: 'redfox', apiKey: 'poll-recovery', maxRequests: 5 });
+  const n = { ...note, id: 'xhs:poll-recovery', nativeId: 'poll-recovery' };
+  let submits = 0,
+    polls = 0;
+  const transport = mock((u) => {
+    if (u.pathname.endsWith('commentSubmit')) {
+      submits++;
+      return { code: 2000, data: { taskId: 'poll-task' } };
+    }
+    polls++;
+    return {
+      code: 2000,
+      data: polls === 1 ? { status: 'processing' } : { status: 'completed', commentList: [] },
+    };
+  });
+  const create = () => xhsClient(undefined, transport, 'poll-job');
+  await assert.rejects(create().comments(n, 20, null), XhsPendingError);
+  await assert.rejects(create().comments(n, 20, null), XhsPendingError);
+  assert.deepEqual(await create().comments(n, 20, null), { items: [], nextCursor: null });
+  assert.equal(submits, 1);
+  assert.equal(polls, 2);
+});
+
+test('receipt replay does not consume API budget or falsely mark a locally rejected request uncertain', async () => {
+  saveXhsSettings({ provider: 'tikhub', apiKey: 'replay-budget', maxRequests: 1 });
+  let calls = 0;
+  const transport = mock(() => {
+    calls++;
+    return { code: 200, data: { items: [], has_more: true } };
+  });
+  const first = xhsClient(undefined, transport, 'budget-job');
+  const page = await first.search(input, null);
+  await first.search(input, null);
+  assert.equal(first.requests, 1);
+  await assert.rejects(first.search(input, page.nextCursor), /请求上限/);
+  const resumed = xhsClient(undefined, transport, 'budget-job');
+  await resumed.search(input, null);
+  assert.equal(resumed.requests, 0);
+  await resumed.search(input, page.nextCursor);
+  assert.equal(calls, 2);
+});

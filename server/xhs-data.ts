@@ -1,7 +1,14 @@
+import {
+  claimEntity,
+  journaledFetch,
+  forgetReceivedRequest,
+  UncertainRequestError,
+  RequestBudgetError,
+} from './request-journal.ts';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { Comment, Note, SearchInput } from '../shared/types.ts';
-import { configGet, configSet, encrypt, decrypt, get, put } from './store.ts';
+import { configGet, configSet, encrypt, decrypt, get, put, transaction } from './store.ts';
 import { xhsNotes, platformComments, count, parsePlatformJSON } from './platforms/model.ts';
 
 type Row = Record<string, any>;
@@ -124,7 +131,11 @@ interface RedTask {
   createdAt: string;
   result?: Comment[];
 }
-export function xhsClient(signal?: AbortSignal, transport: typeof fetch = fetch) {
+export function xhsClient(
+  signal?: AbortSignal,
+  transport: typeof fetch = fetch,
+  requestScope?: string,
+) {
   const provider = xhsProvider();
   const fingerprint = xhsFingerprint();
   const key = decrypt(configGet('xhs.key.' + provider));
@@ -134,18 +145,37 @@ export function xhsClient(signal?: AbortSignal, transport: typeof fetch = fetch)
     if (!key) throw new Error('请先在设置中填写 ' + provider + ' API Key');
     signal?.throwIfAborted();
     if (requests >= budget)
-      throw new Error(`已达到本任务 API 请求上限 ${budget}，已保存现有结果；可在设置调整`);
+      throw new RequestBudgetError(
+        `已达到本任务 API 请求上限 ${budget}，已保存现有结果；可在设置调整`,
+      );
   }
-  async function call(path: string, params: Row, query = false): Promise<Row> {
-    checkRequest();
-    requests++;
+  function requestFor(scope: string | undefined, replayOnly = false) {
+    return journaledFetch(
+      scope,
+      async (url, init) => {
+        requests++;
+        return transport(url, init);
+      },
+      checkRequest,
+      replayOnly,
+    );
+  }
+  async function call(
+    path: string,
+    params: Row,
+    query = false,
+    scope = requestScope,
+    replayOnly = false,
+  ): Promise<Row> {
+    if (!key) throw new Error('请先在设置中填写 ' + provider + ' API Key');
+    signal?.throwIfAborted();
     const url = new URL(
       path,
       provider === 'tikhub' ? 'https://api.tikhub.io' : 'https://redfox.hk',
     );
     if (provider === 'tikhub' || query)
       for (const [k, v] of Object.entries(params)) url.searchParams.set(k, String(v));
-    const response = await transport(url, {
+    const init: RequestInit = {
       method: provider === 'tikhub' ? 'GET' : 'POST',
       headers:
         provider === 'tikhub'
@@ -156,7 +186,10 @@ export function xhsClient(signal?: AbortSignal, transport: typeof fetch = fetch)
       signal: signal
         ? AbortSignal.any([signal, AbortSignal.timeout(45000)])
         : AbortSignal.timeout(45000),
-    }).catch(() => {
+    };
+    const response = await requestFor(scope, replayOnly)(url, init).catch((error) => {
+      if (error instanceof UncertainRequestError || error instanceof RequestBudgetError)
+        throw error;
       signal?.throwIfAborted();
       throw new Error(provider + ' 请求超时或网络不可用，未自动重试；请求可能已计费');
     });
@@ -164,7 +197,10 @@ export function xhsClient(signal?: AbortSignal, transport: typeof fetch = fetch)
       throw new Error(
         `${provider} HTTP ${response.status}，请检查密钥、余额或服务状态；未自动重试`,
       );
-    return unwrap(provider, parsePlatformJSON(await response.text()));
+    const data = unwrap(provider, parsePlatformJSON(await response.text()));
+    // A definitive pending poll can be polled again. A lost poll response cannot.
+    if (query && ['pending', 'processing'].includes(data.status)) forgetReceivedRequest(response);
+    return data;
   }
   const tik = (name: string, params: Row) => call('/api/v1/xiaohongshu/app_v2/' + name, params);
   return {
@@ -220,30 +256,53 @@ export function xhsClient(signal?: AbortSignal, transport: typeof fetch = fetch)
       if (provider === 'redfox') {
         const id = fingerprint + ':' + native + ':' + limit;
         let task = get<RedTask>('xhs-api-tasks', id);
+        let claimed = false;
         if (!task) {
-          checkRequest(); // A local rejection is not an uncertain paid submission.
-          // Persist before sending: a lost response must never cause an automatic second paid submission.
+          checkRequest();
           task = { id, state: 'submitting', createdAt: new Date().toISOString() };
-          put('xhs-api-tasks', task);
-          const d = await call('/story/api/xhs/commentSubmit', { opusId: native, dataNum: limit });
+          claimed = claimEntity('xhs-api-tasks', task);
+          if (!claimed)
+            throw new XhsPendingError('RedFox 任务已由另一个进程占用，请稍后继续；未重复提交');
+        }
+        if (!task.taskId) {
+          let d: Row;
+          try {
+            // Task-scoped receipt also survives a crash before taskId is saved.
+            // Existing uncertain tasks may only replay, never create a submission.
+            d = await call(
+              '/story/api/xhs/commentSubmit',
+              { opusId: native, dataNum: limit },
+              false,
+              'redfox-submit:' + id,
+              !claimed,
+            );
+          } catch (error) {
+            if (error instanceof UncertainRequestError)
+              throw new XhsPendingError(
+                'RedFox 提交结果不确定，已阻止重复扣费。请在设置中填入供应商后台任务编号后继续。记录：' +
+                  id,
+              );
+            throw error;
+          }
           if (!d.taskId) throw new Error('RedFox 未返回任务编号，请在供应商后台核对，避免重复计费');
-          task = {
-            ...task,
-            taskId: String(d.taskId),
-            visibleAfterTime: String(d.visibleAfterTime || ''),
-            state: 'pending',
-          };
-          put('xhs-api-tasks', task);
+          task = transaction(() => {
+            const current = get<RedTask>('xhs-api-tasks', id)!;
+            // Another process may already have recovered and completed this task.
+            if (current.taskId) return current;
+            const updated = {
+              ...current,
+              taskId: String(d.taskId),
+              visibleAfterTime: String(d.visibleAfterTime || ''),
+              state: 'pending',
+            };
+            put('xhs-api-tasks', updated);
+            return updated;
+          });
           throw new XhsPendingError(
             `RedFox 评论任务已提交（${task.taskId}），预计 ${task.visibleAfterTime || '24 小时后'} 可查询。稍后继续流程或重新采集同一作品、相同条数，将复用任务而不会重复提交。`,
           );
         }
         if (task.result) return { items: task.result, nextCursor: null };
-        if (!task.taskId)
-          throw new XhsPendingError(
-            'RedFox 提交结果不确定，已阻止重复扣费。请在设置中填入供应商后台任务编号后继续。记录：' +
-              id,
-          );
         const d = await call('/story/api/xhs/commentResult', { taskId: task.taskId }, true);
         if (['pending', 'processing'].includes(d.status))
           throw new XhsPendingError(

@@ -237,6 +237,7 @@ export type WorkResolver = (
   url: string,
   platform: AcquisitionInput['platform'],
   signal: AbortSignal,
+  requestScope?: string,
 ) => Promise<Note>;
 export async function runWorkflow(
   w: AcquisitionWorkflow,
@@ -352,7 +353,7 @@ export async function runWorkflow(
           `正在读取指定作品 ${Object.keys(w.linkNoteIds).length + 1}/${w.input.links.length}`,
         );
         const link = parseWorkLink(url);
-        const note = await resolve(url, w.input.platform, abort.signal);
+        const note = await resolve(url, w.input.platform, abort.signal, 'workflow:' + w.id);
         abort.signal.throwIfAborted();
         const actual = parseWorkLink(note.url);
         if (

@@ -1,3 +1,4 @@
+import { journaledFetch } from './request-journal.ts';
 import { z } from 'zod';
 import { configGet, decrypt } from './store.ts';
 const noteSchema = z.object({
@@ -55,6 +56,8 @@ export async function providerCall<T>(
   body: unknown,
   schema: z.ZodType<T>,
   signal?: AbortSignal,
+  requestScope?: string,
+  beforeDispatch?: () => void,
 ): Promise<T> {
   const base = configGet('providerUrl');
   if (!base) throw new Error('请先在连接设置中配置真实数据服务地址');
@@ -62,7 +65,11 @@ export async function providerCall<T>(
   const accountId =
     (body as { accountId?: string })?.accountId || configGet('accountId', 'demo-account');
   const cookie = getCookie(accountId);
-  const response = await fetch(`${base.replace(/\/$/, '')}${path}`, {
+  const response = await journaledFetch(
+    requestScope,
+    fetch,
+    beforeDispatch,
+  )(`${base.replace(/\/$/, '')}${path}`, {
     method: 'POST',
     redirect: 'error',
     headers: {

@@ -218,6 +218,7 @@ export async function runJob(
   input: z.infer<typeof searchSchema>,
   parentSignal?: AbortSignal,
 ) {
+  if (running.has(job.id)) return;
   const abort = new AbortController();
   const cancel = () => abort.abort();
   parentSignal?.addEventListener('abort', cancel, { once: true });
@@ -239,9 +240,9 @@ export async function runJob(
       job.source !== 'live'
         ? null
         : input.platform === 'xiaohongshu'
-          ? xhsClient(abort.signal)
+          ? xhsClient(abort.signal, fetch, job.id)
           : douyinUsesApi()
-            ? douyinClient(abort.signal)
+            ? douyinClient(abort.signal, fetch, job.id)
             : null;
     const fingerprint =
       job.source === 'live' ? collector?.fingerprint || douyinFingerprint() : undefined;
@@ -316,7 +317,8 @@ export async function runJob(
               signal: abort.signal,
             },
           );
-        if (!collector) reservePlatformAction(input.platform, job.type);
+        if (!collector && douyinProvider() === 'browser')
+          reservePlatformAction(input.platform, job.type);
         const result: {
           items: (Omit<Note, 'source'> | Omit<Comment, 'source'>)[];
           nextCursor: string | null;
@@ -347,12 +349,16 @@ export async function runJob(
                   },
                   schemas.search,
                   abort.signal,
+                  job.id,
+                  () => reservePlatformAction(input.platform, job.type),
                 )
               : await providerCall(
                   '/comments',
                   { noteId: job.noteId, includeReplies: true, cursor, platform: input.platform },
                   schemas.comments,
                   abort.signal,
+                  job.id,
+                  () => reservePlatformAction(input.platform, job.type),
                 );
         readId = result.readId || readId;
         if (job.type === 'search' && result.evidence) {
@@ -463,9 +469,10 @@ async function resolveWorkflowWork(
   url: string,
   platform: 'xiaohongshu' | 'douyin',
   signal: AbortSignal,
+  requestScope?: string,
 ) {
-  if (platform === 'xiaohongshu') return xhsClient(signal).detail(url);
-  if (douyinUsesApi()) return douyinClient(signal).detail(url);
+  if (platform === 'xiaohongshu') return xhsClient(signal, fetch, requestScope).detail(url);
+  if (douyinUsesApi()) return douyinClient(signal, fetch, requestScope).detail(url);
   reservePlatformAction(platform, 'search');
   try {
     const note = await browserCall<Note>('/resolve-work', { url, platform }, signal);

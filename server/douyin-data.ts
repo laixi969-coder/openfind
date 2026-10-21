@@ -1,3 +1,4 @@
+import { journaledFetch, UncertainRequestError, RequestBudgetError } from './request-journal.ts';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { Note, SearchInput } from '../shared/types.ts';
@@ -107,25 +108,38 @@ function nextPage(d: Row, previous: unknown) {
     throw new Error('抖音 API 返回无效或重复分页游标');
   return d.cursor;
 }
-export function douyinClient(signal?: AbortSignal, transport: typeof fetch = fetch) {
+export function douyinClient(
+  signal?: AbortSignal,
+  transport: typeof fetch = fetch,
+  requestScope?: string,
+) {
   const provider = douyinProvider();
   if (provider !== 'tikhub' && provider !== 'redfox')
     throw new Error('当前抖音数据源不是供应商 API');
   const key = decrypt(configGet('douyin.key.' + provider));
   const budget = douyinSettings().maxRequests;
   let requests = 0;
+  const request = journaledFetch(
+    requestScope,
+    async (url, init) => {
+      requests++;
+      return transport(url, init);
+    },
+    () => {
+      if (requests >= budget)
+        throw new RequestBudgetError(`已达到本步骤 API 请求上限 ${budget}；已保存已有结果`);
+    },
+  );
   async function call(path: string, params: Row, method: 'GET' | 'POST' = 'POST'): Promise<Row> {
     signal?.throwIfAborted();
     if (!key) throw new Error('请在设置 → 抖音数据源填写 ' + provider + ' API Key');
-    if (requests >= budget) throw new Error(`已达到本步骤 API 请求上限 ${budget}；已保存已有结果`);
-    requests++;
     const url = new URL(
       path,
       provider === 'tikhub' ? 'https://api.tikhub.io' : 'https://redfox.hk',
     );
     if (method === 'GET')
       for (const [k, v] of Object.entries(params)) url.searchParams.set(k, String(v));
-    const response = await transport(url, {
+    const response = await request(url, {
       method,
       headers: {
         'Content-Type': 'application/json',
@@ -136,7 +150,9 @@ export function douyinClient(signal?: AbortSignal, transport: typeof fetch = fet
       signal: signal
         ? AbortSignal.any([signal, AbortSignal.timeout(45000)])
         : AbortSignal.timeout(45000),
-    }).catch(() => {
+    }).catch((error) => {
+      if (error instanceof UncertainRequestError || error instanceof RequestBudgetError)
+        throw error;
       signal?.throwIfAborted();
       throw new Error(provider + ' 请求超时或网络不可用；未自动重试，请求可能已计费');
     });
