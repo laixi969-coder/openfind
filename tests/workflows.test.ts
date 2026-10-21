@@ -402,3 +402,31 @@ test('Mismatched work identity and sensitive target pages stop before comments o
     assert.match(w.message, sensitive ? /敏感主题/ : /身份不一致/);
   }
 });
+
+test('Expanded workflow collects more than five works and popular search honors requested size', async () => {
+  const w = createWorkflow({
+    ...input,
+    keyword: '大批量回归',
+    searchLimit: 80,
+    maxNotes: 12,
+    commentLimit: 100,
+  });
+  const seen: number[] = [];
+  await runWorkflow(w, async (j, q) => {
+    if (j.type === 'search') {
+      assert.equal(q.limit, 80);
+      if (q.sort === 'popular') {
+        const notes = Array.from({ length: 12 }, (_, i) => note('large-' + i));
+        for (const n of notes) put('notes', n);
+        j.resultIds = notes.map((n) => n.id);
+      }
+    } else {
+      seen.push(q.limit);
+    }
+    j.status = 'completed';
+    put('jobs', j);
+  });
+  assert.equal(w.status, 'completed');
+  assert.equal(w.completedNoteIds.length, 12);
+  assert.deepEqual(seen, Array(12).fill(100));
+});

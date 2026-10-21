@@ -1,3 +1,4 @@
+import { workflowErrorMessage } from './workflow-errors.ts';
 import { reviewSemantics, semanticFor, llmSettings } from './llm.ts';
 import { compareQualifications } from './qualification-comparison.ts';
 import { randomUUID } from 'node:crypto';
@@ -266,11 +267,7 @@ export async function runWorkflow(
     abort.signal.throwIfAborted();
     const query = {
       keyword: note?.title || w.input.keyword,
-      limit: note
-        ? w.input.commentLimit
-        : sort === 'popular'
-          ? Math.min(10, w.input.searchLimit)
-          : w.input.searchLimit,
+      limit: note ? w.input.commentLimit : w.input.searchLimit,
       sort,
       noteType: 'all' as const,
       mode: w.input.mode,
@@ -447,11 +444,7 @@ export async function runWorkflow(
       w,
       abort.signal.aborted
         ? '已暂停，保留全部结果与检查点；点击继续流程从当前步骤重试'
-        : e instanceof Error
-          ? /locator\.|Timeout .*exceeded/.test(e.message)
-            ? '平台页面控件未及时响应，已保留任务；请检查平台窗口后继续，详细诊断见任务记录'
-            : e.message
-          : '流程暂停，请检查连接',
+        : workflowErrorMessage(e),
     );
   } finally {
     workflowRuns.delete(w.id);

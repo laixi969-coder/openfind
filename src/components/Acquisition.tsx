@@ -1,3 +1,4 @@
+import { acquisitionLimits } from '../../shared/collection-limits';
 import { QualificationComparison } from './QualificationComparison';
 import { AssessmentDetails } from './AssessmentDetails';
 import { CollectionBudget } from './CollectionBudget';
@@ -228,7 +229,7 @@ export function Acquisition() {
                     aria-label="每次搜索作品数"
                     type="number"
                     min={1}
-                    max={40}
+                    max={acquisitionLimits.search}
                     required
                     value={searchLimit}
                     onChange={(e) => setSearchLimit(Number(e.target.value))}
@@ -240,7 +241,7 @@ export function Acquisition() {
                     aria-label="最多采样作品数"
                     type="number"
                     min={1}
-                    max={5}
+                    max={acquisitionLimits.notes}
                     required
                     value={maxNotes}
                     onChange={(e) => setMaxNotes(Number(e.target.value))}
@@ -254,7 +255,7 @@ export function Acquisition() {
                 aria-label="每篇评论上限"
                 type="number"
                 min={1}
-                max={50}
+                max={acquisitionLimits.comments}
                 required
                 value={commentLimit}
                 onChange={(e) => setCommentLimit(Number(e.target.value))}
@@ -287,8 +288,8 @@ export function Acquisition() {
         </form>
         <p className="field-hint">
           {inputSource === 'links'
-            ? '链接获客默认每篇20条、最多50条评论；作品读取每篇占用1个本地搜索/作品读取批次，评论按实际采集批次计数。'
-            : '默认最多采样3篇，每篇20条评论。'}
+            ? '链接获客默认每篇20条、最多100条评论；作品读取每篇占用1个本地搜索/作品读取批次，评论按实际采集批次计数。'
+            : '默认最多采样3篇，每篇20条评论；搜索数、采样作品数和每篇评论数均可手动输入1–100。实际数量取决于平台返回、符合条件的作品及剩余采集额度。'}
           仅将近7天明确需求保存为候选，仍需核对产品与地区匹配；不自动发送消息。登录、验证、额度或连接问题会暂停并保留进度。
         </p>
       </section>

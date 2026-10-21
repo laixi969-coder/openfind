@@ -1,3 +1,4 @@
+import { browserLaunchOptions } from './launch-options.ts';
 import { openDouyinComments } from './comment-panel.ts';
 import { chromium, type BrowserContext, type Page, type Response } from 'playwright';
 import { directProxy, closeNetwork, allowNetworkRequest } from './network.ts';
@@ -126,29 +127,14 @@ export async function openLogin(platform: Platform): Promise<Session> {
     chmodSync(profile, 0o700);
     const direct = configGet('browserNetwork:' + platform) === 'direct';
     const proxy = direct ? await directProxy() : undefined;
-    const context = await chromium.launchPersistentContext(profile, {
-      channel: 'chrome',
-      headless: false,
-      ...(platform === 'douyin' ? { ignoreDefaultArgs: true } : {}),
-      viewport: { width: 1280, height: 860 },
-      locale: 'zh-CN',
-      acceptDownloads: true,
-      proxy,
-      args:
-        platform === 'douyin'
-          ? [
-              '--user-data-dir=' + profile,
-              '--remote-debugging-pipe',
-              '--enable-automation',
-              '--no-first-run',
-              '--no-default-browser-check',
-              '--password-store=basic',
-              '--use-mock-keychain',
-              ...(proxy ? ['--proxy-server=' + proxy.server] : []),
-              'about:blank',
-            ]
-          : ['--no-first-run', '--no-default-browser-check'],
-    });
+    const context = await chromium
+      .launchPersistentContext(profile, browserLaunchOptions(proxy))
+      .catch((error: unknown) => {
+        throw new Error(
+          '平台浏览器启动失败；请重启内置浏览器服务后继续任务。诊断：' +
+            (error instanceof Error ? error.message : String(error)),
+        );
+      });
     installDiagnostics(context, platform);
     networkEvents[platform] = [];
     if (direct) context.on('request', (request) => allowNetworkRequest(request.url()));

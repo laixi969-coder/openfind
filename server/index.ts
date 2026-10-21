@@ -1,3 +1,4 @@
+import { acquisitionLimits } from '../shared/collection-limits.ts';
 import inboxRouter, { pollInbox } from './inbox.ts';
 import salesRouter from './sales.ts';
 import { llmSettings, saveLlmSettings, syncModels, testLlm, semanticFor } from './llm.ts';
@@ -381,9 +382,9 @@ const acquisitionSchema = z.object({
   keyword: z.string().trim().min(1).max(100),
   platform: z.enum(['xiaohongshu', 'douyin']),
   mode: z.enum(['demo', 'live']),
-  searchLimit: z.number().int().min(1).max(40).default(20),
-  maxNotes: z.number().int().min(1).max(5).default(3),
-  commentLimit: z.number().int().min(1).max(50).default(20),
+  searchLimit: z.number().int().min(1).max(acquisitionLimits.search).default(20),
+  maxNotes: z.number().int().min(1).max(acquisitionLimits.notes).default(3),
+  commentLimit: z.number().int().min(1).max(acquisitionLimits.comments).default(20),
   supplement: z.boolean().default(true),
 });
 async function resolveWorkflowWork(
@@ -406,7 +407,7 @@ app.post('/api/workflows/links', (req, res) => {
   const input = z
     .object({
       content: z.string().trim().min(1).max(12000),
-      commentLimit: z.number().int().min(1).max(50).default(20),
+      commentLimit: z.number().int().min(1).max(acquisitionLimits.comments).default(20),
     })
     .strict()
     .parse(req.body);
