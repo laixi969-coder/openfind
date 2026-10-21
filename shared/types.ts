@@ -110,7 +110,12 @@ export interface Log {
   message: string;
 }
 export interface Job {
-  checkpoint?: { nextCursor: string | null; visitedCursors: string[]; exhausted?: boolean };
+  checkpoint?: {
+    nextCursor: string | null;
+    visitedCursors: string[];
+    exhausted?: boolean;
+    requestReceipts?: { id: string; attempt: string }[];
+  };
   dataProvider?: string;
   searchEvidence?: {
     sort: SearchInput['sort'];

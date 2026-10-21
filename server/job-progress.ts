@@ -1,3 +1,9 @@
+import {
+  checkpointDigest,
+  acknowledgeReceipts,
+  validateReceiptRefs,
+  type ReceiptRef,
+} from './request-journal.ts';
 import type { Job, Note, Comment, SearchInput } from '../shared/types.ts';
 import { get, put, transaction } from './store.ts';
 
@@ -6,6 +12,7 @@ export function commitJobPage(
   input: SearchInput,
   items: (Note | Comment)[],
   checkpoint?: Job['checkpoint'],
+  receipts: ReceiptRef[] = [],
 ) {
   const kind = job.type === 'search' ? 'notes' : 'comments';
   // Validate the whole response before overwriting any existing entity.
@@ -45,7 +52,11 @@ export function commitJobPage(
   next.count = next.resultIds.length;
   next.pages++;
   next.checkpoint = checkpoint
-    ? { ...checkpoint, exhausted: checkpoint.nextCursor === null && !truncated }
+    ? {
+        ...checkpoint,
+        ...(receipts.length ? { requestReceipts: receipts } : {}),
+        exhausted: checkpoint.nextCursor === null && !truncated,
+      }
     : undefined;
   next.dataFetchedAt = new Date().toISOString();
   transaction(() => {
@@ -56,7 +67,34 @@ export function commitJobPage(
           get<Note>('notes', a)?.publishedAt || '',
         ),
       );
+    acknowledgeReceipts(job.id, next.pages, receipts);
     put('jobs', next);
+    put('job-pages', { id: job.id + ':' + next.pages, digest: checkpointDigest(next), receipts });
   });
   Object.assign(job, next);
+}
+
+export function validateJobCheckpoint(job: Job) {
+  const marker = get<{ digest: string; receipts: ReceiptRef[] }>(
+    'job-pages',
+    job.id + ':' + job.pages,
+  );
+  if (!marker) {
+    if (job.checkpoint?.requestReceipts?.length)
+      throw new Error('分页提交记录缺失，已阻止继续请求');
+    return; // Legacy checkpoints have no receipt link.
+  }
+  if (marker.digest !== checkpointDigest(job))
+    throw new Error('分页检查点与已提交结果不一致，已阻止继续请求');
+  validateReceiptRefs(job.id, job.pages, marker.receipts);
+  for (const id of job.resultIds) {
+    const item = get<Note | Comment>(job.type === 'search' ? 'notes' : 'comments', id);
+    if (
+      !item ||
+      item.source !== job.source ||
+      item.platform !== job.platform ||
+      (job.type === 'comments' && (item as Comment).noteId !== job.noteId)
+    )
+      throw new Error('分页检查点引用的结果缺失或身份不一致，已阻止继续请求');
+  }
 }

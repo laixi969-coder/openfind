@@ -161,17 +161,102 @@ test('SIGKILL after receipt persistence replays the paid result without the vend
 });
 
 test('a late pending poll consumer cannot delete the newer completed receipt', async () => {
-  const { forgetReceivedRequest } = await import('../server/request-journal.ts');
+  const { advancePendingPoll } = await import('../server/request-journal.ts');
   let calls = 0;
   const transport = (async () =>
-    new Response(++calls === 1 ? 'processing' : 'completed')) as typeof fetch;
-  const request = journaledFetch('poll-generation', transport);
+    Response.json({
+      code: 2000,
+      data: { status: ++calls === 1 ? 'processing' : 'completed' },
+    })) as typeof fetch;
+  const request = journaledFetch('poll-generation', transport, undefined, false, true);
   const first = await request(url);
   const lateConsumer = await request(url);
-  forgetReceivedRequest(first);
+  advancePendingPoll(first);
   const completed = await request(url);
-  assert.equal(await completed.text(), 'completed');
-  forgetReceivedRequest(lateConsumer);
-  assert.equal(await (await request(url)).text(), 'completed');
+  assert.equal((await completed.json()).data.status, 'completed');
+  advancePendingPoll(lateConsumer);
+  assert.equal((await (await request(url)).json()).data.status, 'completed');
   assert.equal(calls, 2);
+});
+
+test('removing received or uncertain response records cannot reopen dispatch', async () => {
+  const { remove } = await import('../server/store.ts');
+  for (const fail of [false, true]) {
+    let calls = 0;
+    const request = journaledFetch('removed-' + fail, (async () => {
+      calls++;
+      if (fail) throw Error('lost response');
+      return new Response('saved');
+    }) as typeof fetch);
+    const previous = new Set(all<any>('request-receipts').map((r) => r.id));
+    await request(url).catch(() => {});
+    const receipt = all<any>('request-receipts').find((r) => !previous.has(r.id))!;
+    remove('request-receipts', receipt.id);
+    await assert.rejects(request(url), UncertainRequestError);
+    assert.equal(calls, 1);
+  }
+});
+
+test('poll advancement cannot release a successful paid response or unmarked request', async () => {
+  const { advancePendingPoll, compactConsumedReceipt, captureRequestReceipts } =
+    await import('../server/request-journal.ts');
+  let calls = 0;
+  const request = journaledFetch('not-a-poll', (async () => {
+    calls++;
+    return Response.json({ code: 2000, data: { status: 'processing' } });
+  }) as typeof fetch);
+  const captured = await captureRequestReceipts(() => request(url));
+  assert.equal(advancePendingPoll(captured.result), false);
+  assert.equal(compactConsumedReceipt(captured.receipts[0]), false);
+  await request(url);
+  assert.equal(calls, 1);
+  const success = journaledFetch(
+    'completed-poll',
+    (async () => {
+      calls++;
+      return Response.json({ code: 2000, data: { status: 'completed' } });
+    }) as typeof fetch,
+    undefined,
+    false,
+    true,
+  );
+  assert.equal(advancePendingPoll(await success(url)), false);
+  await success(url);
+  assert.equal(calls, 2);
+});
+
+test('legacy receipts acquire a permanent guard on process startup', async () => {
+  const { remove } = await import('../server/store.ts');
+  const { captureRequestReceipts } = await import('../server/request-journal.ts');
+  const captured = await captureRequestReceipts(() =>
+    journaledFetch(
+      'legacy-upgrade',
+      (async () => new Response('legacy-data')) as typeof fetch,
+    )(url),
+  );
+  const ref = captured.receipts[0];
+  remove('request-guards', ref.id);
+  const child = worker('legacy-upgrade', url);
+  try {
+    assert.equal((await message(child)).result, 'legacy-data');
+  } finally {
+    await stop(child);
+  }
+  remove('request-receipts', ref.id);
+  await assert.rejects(journaledFetch('legacy-upgrade')(url), UncertainRequestError);
+});
+
+test('mismatched persisted response and guard are rejected instead of replayed or resent', async () => {
+  const { put } = await import('../server/store.ts');
+  const { captureRequestReceipts } = await import('../server/request-journal.ts');
+  let calls = 0;
+  const request = journaledFetch('response-integrity', (async () => {
+    calls++;
+    return new Response('original');
+  }) as typeof fetch);
+  const captured = await captureRequestReceipts(() => request(url));
+  const row = all<any>('request-receipts').find((r) => r.id === captured.receipts[0].id)!;
+  put('request-receipts', { ...row, response: { ...row.response, body: 'different-response' } });
+  await assert.rejects(request(url), UncertainRequestError);
+  assert.equal(calls, 1);
 });

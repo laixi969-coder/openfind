@@ -267,3 +267,32 @@ test('receipt replay does not consume API budget or falsely mark a locally rejec
   await resumed.search(input, page.nextCursor);
   assert.equal(calls, 2);
 });
+
+test('an uncertain RedFox submission resumes through its reconciled vendor task ID without resubmitting', async () => {
+  const { put } = await import('../server/store.ts');
+  saveXhsSettings({ provider: 'redfox', apiKey: 'manual-reconcile', maxRequests: 5 });
+  const n = { ...note, id: 'xhs:manual-reconcile', nativeId: 'manual-reconcile' };
+  let submits = 0,
+    polls = 0;
+  const transport = (async (u: any) => {
+    if (String(u).includes('commentSubmit')) {
+      submits++;
+      throw Error('response lost');
+    }
+    polls++;
+    assert.equal(new URL(String(u)).searchParams.get('taskId'), 'verified-vendor-task');
+    return Response.json({ code: 2000, data: { status: 'completed', commentList: [] } });
+  }) as typeof fetch;
+  await assert.rejects(
+    xhsClient(undefined, transport, 'reconciled-job').comments(n, 20, null),
+    /未自动重试/,
+  );
+  const task = all<any>('xhs-api-tasks').find((t) => t.id.includes('manual-reconcile'))!;
+  put('xhs-api-tasks', { ...task, taskId: 'verified-vendor-task', state: 'pending' });
+  assert.deepEqual(await xhsClient(undefined, transport, 'reconciled-job').comments(n, 20, null), {
+    items: [],
+    nextCursor: null,
+  });
+  assert.equal(submits, 1);
+  assert.equal(polls, 1);
+});

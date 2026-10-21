@@ -1,7 +1,7 @@
 import {
   claimEntity,
   journaledFetch,
-  forgetReceivedRequest,
+  advancePendingPoll,
   UncertainRequestError,
   RequestBudgetError,
 } from './request-journal.ts';
@@ -149,7 +149,7 @@ export function xhsClient(
         `已达到本任务 API 请求上限 ${budget}，已保存现有结果；可在设置调整`,
       );
   }
-  function requestFor(scope: string | undefined, replayOnly = false) {
+  function requestFor(scope: string | undefined, replayOnly = false, polling = false) {
     return journaledFetch(
       scope,
       async (url, init) => {
@@ -158,6 +158,7 @@ export function xhsClient(
       },
       checkRequest,
       replayOnly,
+      polling,
     );
   }
   async function call(
@@ -187,7 +188,11 @@ export function xhsClient(
         ? AbortSignal.any([signal, AbortSignal.timeout(45000)])
         : AbortSignal.timeout(45000),
     };
-    const response = await requestFor(scope, replayOnly)(url, init).catch((error) => {
+    const response = await requestFor(
+      scope,
+      replayOnly,
+      query,
+    )(url, init).catch((error) => {
       if (error instanceof UncertainRequestError || error instanceof RequestBudgetError)
         throw error;
       signal?.throwIfAborted();
@@ -199,7 +204,7 @@ export function xhsClient(
       );
     const data = unwrap(provider, parsePlatformJSON(await response.text()));
     // A definitive pending poll can be polled again. A lost poll response cannot.
-    if (query && ['pending', 'processing'].includes(data.status)) forgetReceivedRequest(response);
+    if (query && ['pending', 'processing'].includes(data.status)) advancePendingPoll(response);
     return data;
   }
   const tik = (name: string, params: Row) => call('/api/v1/xiaohongshu/app_v2/' + name, params);

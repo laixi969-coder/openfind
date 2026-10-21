@@ -43,7 +43,8 @@ import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import multer from 'multer';
 import { dataDir } from './store.ts';
-import { commitJobPage } from './job-progress.ts';
+import { captureRequestReceipts, type ReceiptRef } from './request-journal.ts';
+import { commitJobPage, validateJobCheckpoint } from './job-progress.ts';
 import { cachedJob } from './jobs-cache.ts';
 import { setTimeout as delay } from 'node:timers/promises';
 import JSZip from 'jszip';
@@ -219,6 +220,9 @@ export async function runJob(
   parentSignal?: AbortSignal,
 ) {
   if (running.has(job.id)) return;
+  const saved = get<Job>('jobs', job.id);
+  if (saved)
+    Object.assign(job, { checkpoint: undefined, dataProvider: undefined, query: undefined }, saved);
   const abort = new AbortController();
   const cancel = () => abort.abort();
   parentSignal?.addEventListener('abort', cancel, { once: true });
@@ -231,6 +235,17 @@ export async function runJob(
   const visitedCursors = new Set(job.checkpoint?.visitedCursors || []);
   try {
     abort.signal.throwIfAborted();
+    validateJobCheckpoint(job);
+    const resuming = !!job.dataProvider;
+    if (
+      resuming &&
+      job.query &&
+      ['keyword', 'limit', 'sort', 'noteType', 'mode', 'platform'].some(
+        (key) => job.query![key as keyof typeof input] !== input[key as keyof typeof input],
+      )
+    )
+      throw new Error('恢复参数与原任务不一致，已阻止重新计费；请使用原参数继续');
+    if (!resuming) job.query = { ...input };
     if (job.checkpoint && (!cursor || (input.limit > 0 && job.count >= input.limit))) {
       job.status = 'completed';
       return;
@@ -255,7 +270,7 @@ export async function runJob(
       'INFO',
       `${job.source === 'demo' ? '演示任务' : '真实任务'}开始：${job.type === 'search' ? input.keyword : job.noteId}`,
     );
-    if (job.source === 'live' && !job.checkpoint && !input.forceRefresh) {
+    if (job.source === 'live' && !resuming && !job.checkpoint && !input.forceRefresh) {
       const cached = cachedJob(job, input);
       if (cached) {
         job.resultIds = cached.resultIds.slice(0, input.limit);
@@ -299,6 +314,7 @@ export async function runJob(
       throw new Error('已达到分页保护上限，请新建较小范围的任务');
     for (let page = job.checkpoint ? job.pages : 0; page < 200; page++) {
       let repeatedCursor = false;
+      let receipts: ReceiptRef[] = [];
       abort.signal.throwIfAborted();
       let items: (Note | Comment)[] = [];
       if (job.source === 'demo') {
@@ -319,47 +335,54 @@ export async function runJob(
           );
         if (!collector && douyinProvider() === 'browser')
           reservePlatformAction(input.platform, job.type);
-        const result: {
-          items: (Omit<Note, 'source'> | Omit<Comment, 'source'>)[];
-          nextCursor: string | null;
-          readId?: string;
-          evidence?: { path: string; filterSelected: string | null; sortType: string | null };
-        } = collector
-          ? job.type === 'search'
-            ? await collector.search(input, cursor)
-            : await collector.comments(get<Note>('notes', job.noteId!)!, input.limit, cursor)
-          : douyinProvider() === 'browser'
-            ? await browserCall<{ items: (Note | Comment)[]; nextCursor: string | null }>(
-                job.type === 'search' ? '/search' : '/comments',
-                job.type === 'search'
-                  ? { ...input, cursor }
-                  : { note: get<Note>('notes', job.noteId!), cursor },
-                abort.signal,
-              )
-            : job.type === 'search'
-              ? await providerCall(
-                  '/search',
-                  {
-                    keyword: input.keyword,
-                    platform: input.platform,
-                    limit: input.limit,
-                    sort: input.sort,
-                    noteType: input.noteType,
-                    cursor,
-                  },
-                  schemas.search,
+        const captured: {
+          result: {
+            items: (Omit<Note, 'source'> | Omit<Comment, 'source'>)[];
+            nextCursor: string | null;
+            readId?: string;
+            evidence?: { path: string; filterSelected: string | null; sortType: string | null };
+          };
+          receipts: ReceiptRef[];
+        } = await captureRequestReceipts(async () =>
+          collector
+            ? job.type === 'search'
+              ? await collector.search(input, cursor)
+              : await collector.comments(get<Note>('notes', job.noteId!)!, input.limit, cursor)
+            : douyinProvider() === 'browser'
+              ? await browserCall<{ items: (Note | Comment)[]; nextCursor: string | null }>(
+                  job.type === 'search' ? '/search' : '/comments',
+                  job.type === 'search'
+                    ? { ...input, cursor }
+                    : { note: get<Note>('notes', job.noteId!), cursor },
                   abort.signal,
-                  job.id,
-                  () => reservePlatformAction(input.platform, job.type),
                 )
-              : await providerCall(
-                  '/comments',
-                  { noteId: job.noteId, includeReplies: true, cursor, platform: input.platform },
-                  schemas.comments,
-                  abort.signal,
-                  job.id,
-                  () => reservePlatformAction(input.platform, job.type),
-                );
+              : job.type === 'search'
+                ? await providerCall(
+                    '/search',
+                    {
+                      keyword: input.keyword,
+                      platform: input.platform,
+                      limit: input.limit,
+                      sort: input.sort,
+                      noteType: input.noteType,
+                      cursor,
+                    },
+                    schemas.search,
+                    abort.signal,
+                    job.id,
+                    () => reservePlatformAction(input.platform, job.type),
+                  )
+                : await providerCall(
+                    '/comments',
+                    { noteId: job.noteId, includeReplies: true, cursor, platform: input.platform },
+                    schemas.comments,
+                    abort.signal,
+                    job.id,
+                    () => reservePlatformAction(input.platform, job.type),
+                  ),
+        );
+        const result = captured.result;
+        receipts = captured.receipts;
         readId = result.readId || readId;
         if (job.type === 'search' && result.evidence) {
           job.searchEvidence = { ...result.evidence, sort: input.sort };
@@ -384,6 +407,7 @@ export async function runJob(
         input,
         items,
         resumable ? { nextCursor: cursor, visitedCursors: [...visitedCursors] } : undefined,
+        receipts,
       );
       job.elapsed = Math.round((Date.now() - started) / 1000);
       log(

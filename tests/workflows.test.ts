@@ -625,3 +625,29 @@ test('a pending paid child without a first page retains its provider identity on
   assert.equal(restored.status, 'paused');
   assert.equal(restored.currentJobId, childId);
 });
+
+test('missing or changed paid children pause instead of creating a fresh billing scope', async () => {
+  for (const missing of [false, true]) {
+    const w = createWorkflow({
+      ...input,
+      keyword: 'paid-child-integrity-' + missing,
+      supplement: false,
+    });
+    await runWorkflow(w, async (j) => {
+      j.dataProvider = 'paid-provider';
+      j.status = 'stopped';
+      put('jobs', j);
+    });
+    const id = w.currentJobId!;
+    if (missing) db.prepare('DELETE FROM entities WHERE kind=? AND id=?').run('jobs', id);
+    else w.input.searchLimit++;
+    let requests = 0;
+    await runWorkflow(w, async () => {
+      requests++;
+    });
+    assert.equal(w.status, 'paused');
+    assert.equal(w.currentJobId, id);
+    assert.match(w.message, /阻止新建任务/);
+    assert.equal(requests, 0);
+  }
+});

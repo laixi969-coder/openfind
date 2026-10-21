@@ -221,3 +221,64 @@ test('failed page commit recovers its persisted response without another request
   assert.equal(restored.pages, 1);
   assert.deepEqual(cursors, [null]);
 });
+
+test('resume rejects changed request parameters and corrupted terminal checkpoints without dispatch', async () => {
+  reset();
+  mode = 'normal';
+  const j = job('bound-checkpoint');
+  await runJob(j, { ...query, limit: 1 });
+  assert.equal(j.status, 'completed');
+  assert.equal(j.checkpoint?.requestReceipts?.length, 1);
+  await runJob(j, { ...query, limit: 2 });
+  assert.equal(j.status, 'failed');
+  assert.match(j.error!, /恢复参数/);
+  assert.deepEqual(cursors, [null]);
+  put('jobs', { ...j, count: 99 });
+  await runJob(j, { ...query, limit: 1 });
+  assert.equal(j.status, 'failed');
+  assert.match(j.error!, /检查点/);
+  assert.deepEqual(cursors, [null]);
+});
+
+test('restoring a stale job object uses the durable checkpoint after response compaction', async () => {
+  reset();
+  mode = 'normal';
+  const { compactConsumedReceipt } = await import('../server/request-journal.ts');
+  const j = job('stale-after-compaction');
+  const stale = structuredClone(j);
+  await runJob(j, { ...query, limit: 1 });
+  assert.equal(compactConsumedReceipt(j.checkpoint!.requestReceipts![0]), true);
+  await runJob(stale, { ...query, limit: 1 });
+  assert.equal(stale.status, 'completed');
+  assert.equal(stale.count, 1);
+  assert.deepEqual(cursors, [null]);
+});
+
+test('another completed cache cannot conceal an uncertain first-page request', async () => {
+  reset();
+  mode = 'late';
+  requestReceived = new Promise((r) => {
+    received = r;
+  });
+  responseRelease = new Promise((r) => {
+    release = r;
+  });
+  const j = job('uncertain-not-cacheable');
+  const abort = new AbortController();
+  const pending = runJob(j, query, abort.signal);
+  await requestReceived;
+  abort.abort();
+  release();
+  await pending;
+  put('jobs', {
+    ...j,
+    id: 'unrelated-cache',
+    status: 'completed',
+    checkpoint: { nextCursor: null, visitedCursors: [], exhausted: true },
+    dataFetchedAt: new Date().toISOString(),
+  });
+  await runJob(j, { ...query, forceRefresh: false });
+  assert.equal(j.status, 'failed');
+  assert.match(j.error!, /阻止自动重发/);
+  assert.deepEqual(cursors, [null]);
+});

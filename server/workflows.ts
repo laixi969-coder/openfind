@@ -1,3 +1,4 @@
+import { validateJobCheckpoint } from './job-progress.ts';
 import { saveCollectedLead } from './leads.ts';
 import { douyinUsesApi, requireDouyinComments } from './douyin-data.ts';
 import { workflowErrorMessage } from './workflow-errors.ts';
@@ -272,6 +273,10 @@ export async function runWorkflow(
       previous.query?.keyword === query.keyword &&
       previous.query?.limit === query.limit &&
       (previous.status === 'completed' || previous.checkpoint || previous.dataProvider);
+    if (w.currentJobId && !previous)
+      throw new Error('恢复所需子任务记录缺失，已阻止新建任务和重复计费');
+    if (previous && (previous.dataProvider || previous.checkpoint) && !reusable)
+      throw new Error('恢复参数与原子任务不一致，已阻止新建任务和重复计费');
     const j: Job = reusable
       ? previous
       : {
@@ -290,6 +295,7 @@ export async function runWorkflow(
           query,
           createdAt: new Date().toISOString(),
         };
+    validateJobCheckpoint(j);
     const locallyComplete =
       j.status === 'completed' ||
       (j.checkpoint && (j.checkpoint.nextCursor === null || j.count >= query.limit));

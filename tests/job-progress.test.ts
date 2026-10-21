@@ -146,3 +146,88 @@ test('a truncated last page cannot masquerade as an exhausted larger-query cache
   assert.ok(cachedJob({ ...j, id: 'one' }, q));
   assert.equal(cachedJob({ ...j, id: 'two' }, { ...q, limit: 2 }), undefined);
 });
+
+test('receipt acknowledgement and page marker commit atomically; only consumed bodies can be compacted', async () => {
+  const { journaledFetch, captureRequestReceipts, compactConsumedReceipt, UncertainRequestError } =
+    await import('../server/request-journal.ts');
+  const { validateJobCheckpoint } = await import('../server/job-progress.ts');
+  const j = makeJob('receipt-atomic');
+  put('jobs', j);
+  let calls = 0;
+  const request = journaledFetch(j.id, (async () => {
+    calls++;
+    return Response.json({ result: 'paid' });
+  }) as typeof fetch);
+  const captured = await captureRequestReceipts(() => request('https://vendor.example/atomic'));
+  const ref = captured.receipts[0];
+  assert.equal(compactConsumedReceipt(ref), false);
+  db.exec(
+    "CREATE TRIGGER fail_receipt_page BEFORE UPDATE ON entities WHEN NEW.kind='jobs' AND NEW.id='receipt-atomic' BEGIN SELECT RAISE(ABORT, 'checkpoint failure'); END",
+  );
+  try {
+    assert.throws(
+      () =>
+        commitJobPage(
+          j,
+          query,
+          [makeNote('receipt-note')],
+          { nextCursor: null, visitedCursors: [] },
+          captured.receipts,
+        ),
+      /checkpoint failure/,
+    );
+    assert.equal(get<any>('request-guards', ref.id).state, 'received');
+    assert.equal(get('job-pages', j.id + ':1'), undefined);
+    assert.equal(get('notes', 'receipt-note'), undefined);
+    assert.equal(compactConsumedReceipt(ref), false);
+  } finally {
+    db.exec('DROP TRIGGER fail_receipt_page');
+  }
+  commitJobPage(
+    j,
+    query,
+    [makeNote('receipt-note')],
+    { nextCursor: null, visitedCursors: [] },
+    captured.receipts,
+  );
+  validateJobCheckpoint(j);
+  assert.equal(get<any>('request-guards', ref.id).state, 'consumed');
+  put('jobs', { ...j, count: 999 });
+  assert.equal(compactConsumedReceipt(ref), false);
+  put('jobs', j);
+  assert.equal(compactConsumedReceipt(ref), true);
+  assert.equal(get('request-receipts', ref.id), undefined);
+  validateJobCheckpoint(get<Job>('jobs', j.id)!);
+  await assert.rejects(request('https://vendor.example/atomic'), UncertainRequestError);
+  assert.equal(calls, 1);
+  assert.throws(
+    () =>
+      validateJobCheckpoint({ ...j, checkpoint: { ...j.checkpoint!, nextCursor: 'fabricated' } }),
+    /不一致/,
+  );
+});
+
+test('a response from a different task cannot acknowledge or advance this page', async () => {
+  const { journaledFetch, captureRequestReceipts } = await import('../server/request-journal.ts');
+  const j = makeJob('wrong-receipt-owner');
+  put('jobs', j);
+  const captured = await captureRequestReceipts(() =>
+    journaledFetch(
+      'other-task',
+      (async () => new Response('other')) as typeof fetch,
+    )('https://vendor.example/other'),
+  );
+  assert.throws(
+    () =>
+      commitJobPage(
+        j,
+        query,
+        [makeNote('wrong-owner-note')],
+        { nextCursor: null, visitedCursors: [] },
+        captured.receipts,
+      ),
+    /不一致/,
+  );
+  assert.equal(get('notes', 'wrong-owner-note'), undefined);
+  assert.equal(get<Job>('jobs', j.id)!.pages, 0);
+});
