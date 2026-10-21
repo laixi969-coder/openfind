@@ -1,5 +1,6 @@
+import { xhsClient, xhsSettings, saveXhsSettings, XhsPendingError } from './xhs-data.ts';
 import { acquisitionLimits } from '../shared/collection-limits.ts';
-import inboxRouter, { pollInbox } from './inbox.ts';
+import inboxRouter from './inbox.ts';
 import salesRouter from './sales.ts';
 import { llmSettings, saveLlmSettings, syncModels, testLlm, semanticFor } from './llm.ts';
 import express from 'express';
@@ -185,6 +186,9 @@ async function runJob(job: Job, input: z.infer<typeof searchSchema>, parentSigna
   if (parentSignal?.aborted) abort.abort();
   running.set(job.id, abort);
   const started = Date.now();
+  const xhs =
+    job.source === 'live' && input.platform === 'xiaohongshu' ? xhsClient(abort.signal) : null;
+  if (xhs) job.dataProvider = xhs.fingerprint;
   let cursor: string | null = null;
   let readId: string | null = null;
   const seen = new Set<string>();
@@ -243,20 +247,26 @@ async function runJob(job: Job, input: z.infer<typeof searchSchema>, parentSigna
       } else {
         if (page)
           await delay(
-            Math.max(readInterval(protectionStatus(input.platform), job.type), input.interval),
+            Math.max(
+              xhs ? 1000 : readInterval(protectionStatus(input.platform), job.type),
+              input.interval,
+            ),
             undefined,
             {
               signal: abort.signal,
             },
           );
-        reservePlatformAction(input.platform, job.type);
+        if (!xhs) reservePlatformAction(input.platform, job.type);
         const result: {
           items: (Omit<Note, 'source'> | Omit<Comment, 'source'>)[];
           nextCursor: string | null;
           readId?: string;
           evidence?: { path: string; filterSelected: string | null; sortType: string | null };
-        } =
-          settings().connectionType === 'browser'
+        } = xhs
+          ? job.type === 'search'
+            ? await xhs.search(input, cursor)
+            : await xhs.comments(get<Note>('notes', job.noteId!)!, input.limit, cursor)
+          : settings().connectionType === 'browser'
             ? await browserCall<{ items: (Note | Comment)[]; nextCursor: string | null }>(
                 job.type === 'search' ? '/search' : '/comments',
                 job.type === 'search'
@@ -294,7 +304,7 @@ async function runJob(job: Job, input: z.infer<typeof searchSchema>, parentSigna
               `已核对平台排序：${input.sort === 'latest' ? '最新发布' : input.sort === 'popular' ? '最多点赞' : '综合'}，响应 ${result.evidence.path}`,
             );
         }
-        recordPlatformSuccess(input.platform);
+        if (!xhs) recordPlatformSuccess(input.platform);
         items = result.items.map((x) => ({ ...x, source: 'live' })) as (Note | Comment)[];
         const next: string | null = result.nextCursor;
         if (next && next === cursor)
@@ -338,13 +348,19 @@ async function runJob(job: Job, input: z.infer<typeof searchSchema>, parentSigna
       job.status = 'stopped';
       log(job, 'WARN', '任务已停止，已采集结果保留');
     } else {
-      job.status = 'failed';
+      job.status = e instanceof XhsPendingError ? 'stopped' : 'failed';
       job.error = e instanceof Error ? e.message : '任务失败';
-      if (job.source === 'live' && !(e instanceof ProtectionError))
+      if (job.source === 'live' && !xhs && !(e instanceof ProtectionError))
         recordPlatformFailure(input.platform, job.error);
-      log(job, 'ERROR', job.error);
+      log(job, e instanceof XhsPendingError ? 'WARN' : 'ERROR', job.error);
     }
   } finally {
+    if (xhs)
+      log(
+        job,
+        'INFO',
+        `数据源 ${xhs.provider}，本次 API 请求 ${xhs.requests} 次；计费以供应商账单为准`,
+      );
     if (readId) await browserCall('/close-read', { cursor: readId }).catch(() => {});
     job.elapsed = Math.round((Date.now() - started) / 1000);
     if (job.status === 'completed') {
@@ -392,6 +408,7 @@ async function resolveWorkflowWork(
   platform: 'xiaohongshu' | 'douyin',
   signal: AbortSignal,
 ) {
+  if (platform === 'xiaohongshu') return xhsClient(signal).detail(url);
   reservePlatformAction(platform, 'search');
   try {
     const note = await browserCall<Note>('/resolve-work', { url, platform }, signal);
@@ -418,11 +435,11 @@ app.post('/api/workflows/links', (req, res) => {
     res.status(400).json({ error: (e as Error).message });
     return;
   }
-  if (active() || publishing.size) {
+  if (active()) {
     res.status(409).json({ error: '已有任务运行，请先暂停或等待完成' });
     return;
   }
-  if (settings().connectionType !== 'browser') {
+  if (links.some((l) => l.platform === 'douyin') && settings().connectionType !== 'browser') {
     res.status(400).json({ error: '链接获客需要内置平台浏览器，请在连接设置切换连接方式' });
     return;
   }
@@ -441,7 +458,7 @@ app.post('/api/workflows/links', (req, res) => {
 });
 app.post('/api/workflows', (req, res) => {
   const input = acquisitionSchema.parse(req.body);
-  if (active() || publishing.size) {
+  if (active()) {
     res.status(409).json({ error: '已有任务运行，请先暂停或等待完成' });
     return;
   }
@@ -465,7 +482,7 @@ app.post('/api/workflows/:id/review', async (req, res) => {
     res.status(404).json({ error: '流程不存在' });
     return;
   }
-  if (active() || publishing.size || w.status !== 'completed') {
+  if (active() || w.status !== 'completed') {
     res.status(409).json({ error: '请等待当前任务结束，再复核已完成流程' });
     return;
   }
@@ -493,7 +510,7 @@ app.post('/api/workflows/:id/:action', (req, res) => {
     }
     controller.abort();
   } else if (req.params.action === 'resume') {
-    if (w.status !== 'paused' || active() || publishing.size) {
+    if (w.status !== 'paused' || active()) {
       res.status(409).json({ error: '请等待当前任务结束；只有暂停的流程可以继续' });
       return;
     }
@@ -514,11 +531,16 @@ app.post('/api/jobs', (req, res) => {
     res.status(400).json({ error: '真实采集每次请选择 1–100 条；不限数量仅用于演示' });
     return;
   }
-  if (active() || publishing.size) {
+  if (active()) {
     res.status(409).json({ error: '已有采集任务运行，请先停止或等待完成' });
     return;
   }
-  if (input.mode === 'live' && settings().connectionType === 'http' && !configGet('providerUrl')) {
+  if (
+    input.mode === 'live' &&
+    input.platform !== 'xiaohongshu' &&
+    settings().connectionType === 'http' &&
+    !configGet('providerUrl')
+  ) {
     res.status(400).json({ error: '尚未配置真实数据服务，请在连接设置中完成配置' });
     return;
   }
@@ -569,7 +591,7 @@ app.post('/api/comments/collect', (req, res) => {
     res.status(400).json({ error: '真实评论采集每次请选择 1–100 条' });
     return;
   }
-  if (active() || publishing.size) {
+  if (active()) {
     res.status(409).json({ error: '请先等待当前采集结束' });
     return;
   }
@@ -634,18 +656,6 @@ app.post('/api/leads/collect', (req, res) => {
 });
 app.use('/api', salesRouter);
 app.use('/api', inboxRouter);
-if (process.env.NODE_ENV !== 'test') {
-  let polling = false;
-  setInterval(() => {
-    if (polling) return;
-    polling = true;
-    void pollInbox()
-      .catch(() => {})
-      .finally(() => {
-        polling = false;
-      });
-  }, 60000).unref();
-}
 app.patch('/api/leads/:id', (req, res) => {
   const lead = get<Lead>('leads', String(req.params.id));
   if (!lead) {
@@ -717,115 +727,13 @@ app.post('/api/drafts', (req, res) => {
   put('drafts', d);
   res.status(201).json(d);
 });
-const publishing = new Set<string>();
-app.post('/api/drafts/:id/publish', async (req, res) => {
-  const id = String(req.params.id);
-  const d = get<Draft>('drafts', id);
-  if (!d) {
-    res.status(404).json({ error: '请先保存草稿' });
-    return;
-  }
-  if (active()) {
-    res.status(409).json({ error: '请先等待当前采集任务结束，再提交发布' });
-    return;
-  }
-  if (publishing.has(id)) {
-    res.status(409).json({ error: '该草稿正在发布，请勿重复提交' });
-    return;
-  }
-  if (d.status !== 'draft') {
-    res.status(409).json({ error: '草稿已发布，请另存或修改后重新提交' });
-    return;
-  }
-  if (!get<Account>('accounts', d.accountId)) {
-    res.status(400).json({ error: '发布账号与当前连接不一致，请重新选择账号' });
-    return;
-  }
-  publishing.add(id);
-  try {
-    const note = get<Note>('notes', d.noteId);
-    const demo = note?.source === 'demo';
-    if (!demo && settings().mode !== 'live') {
-      res.status(400).json({ error: '真实发布需要在连接设置中切换真实模式' });
-      return;
-    }
-    if (demo) {
-      d.status = 'demo_published';
-      d.receipt = `demo-receipt-${randomUUID()}`;
-    } else {
-      reservePlatformAction(d.platform || 'xiaohongshu', 'publish');
-      if (settings().connectionType === 'browser') {
-        const receipt = await browserCall<{ id: string; url: string }>('/publish', d);
-        d.status = 'published';
-        d.receipt = receipt.url;
-      } else {
-        const health = await providerCall(
-          '/health',
-          { accountId: d.accountId, platform: d.platform },
-          schemas.health,
-        );
-        if (!health.ok) throw new Error('账号预检失败');
-        if (!health.accountId || health.accountId !== d.accountId)
-          throw new Error('账号预检失败：数据服务当前账号与发布账号不一致');
-        const receipt = await providerCall(
-          '/publish',
-          { ...d, idempotencyKey: d.id },
-          schemas.publish,
-        );
-        d.status = 'published';
-        d.receipt = receipt.url;
-      }
-      recordPlatformSuccess(d.platform || 'xiaohongshu');
-    }
-    d.updatedAt = new Date().toISOString();
-    put('drafts', d);
-    res.json(d);
-  } catch (error) {
-    if (!(error instanceof ProtectionError))
-      recordPlatformFailure(
-        d.platform || 'xiaohongshu',
-        error instanceof Error ? error.message : '发布失败',
-      );
-    throw error;
-  } finally {
-    publishing.delete(id);
-  }
-});
-app.post('/api/drafts/:id/reconcile', async (req, res) => {
-  const d = get<Draft>('drafts', String(req.params.id));
-  if (!d) {
-    res.status(404).json({ error: '草稿不存在' });
-    return;
-  }
-  if (publishing.has(d.id)) {
-    res.status(409).json({ error: '发布正在进行，请稍后核对' });
-    return;
-  }
-  const result = await browserCall<{ status: string; receipt?: { url: string }; message?: string }>(
-    '/reconcile-publish',
-    d,
+for (const action of ['publish', 'prepare', 'reconcile']) {
+  app.post(`/api/drafts/:id/${action}`, (_req, res) =>
+    res
+      .status(410)
+      .json({ error: '平台代发与代填已取消，请下载素材包、复制文案后自行到官方平台发布。' }),
   );
-  if (result.status === 'published' && result.receipt) {
-    d.status = 'published';
-    d.receipt = result.receipt.url;
-    d.updatedAt = new Date().toISOString();
-    put('drafts', d);
-  }
-  res.json(result);
-});
-app.post('/api/drafts/:id/prepare', async (req, res) => {
-  const d = get<Draft>('drafts', String(req.params.id));
-  if (!d) {
-    res.status(404).json({ error: '草稿不存在' });
-    return;
-  }
-  if (d.status !== 'draft') {
-    res.status(409).json({ error: '作品已经发布' });
-    return;
-  }
-  reservePlatformAction(d.platform || 'xiaohongshu', 'prepare');
-  res.json(await browserCall('/prepare-publish', d));
-});
+}
 const uploads = join(dataDir, 'uploads');
 mkdirSync(uploads, { recursive: true, mode: 0o700 });
 const upload = multer({
@@ -895,6 +803,56 @@ app.put('/api/llm', (req, res) => {
 });
 app.post('/api/llm/models/sync', async (_req, res) => res.json(await syncModels()));
 app.post('/api/llm/test', async (_req, res) => res.json(await testLlm()));
+app.get('/api/xhs-data', (_req, res) => res.json(xhsSettings()));
+app.put('/api/xhs-data', (req, res) => {
+  if (active()) {
+    res.status(409).json({ error: '请先停止当前任务，再切换数据源或密钥' });
+    return;
+  }
+  res.json(saveXhsSettings(req.body));
+});
+app.post('/api/xhs-data/test', async (req, res) => {
+  const { keyword } = z.object({ keyword: z.string().trim().min(1).max(100) }).parse(req.body);
+  const client = xhsClient();
+  const result = await client.search(
+    {
+      keyword,
+      limit: 1,
+      sort: 'general',
+      noteType: 'all',
+      interval: 1000,
+      mode: 'live',
+      platform: 'xiaohongshu',
+    },
+    null,
+  );
+  res.json({
+    ok: true,
+    count: result.items.length,
+    requests: client.requests,
+    provider: client.provider,
+  });
+});
+app.get('/api/xhs-data/tasks', (_req, res) =>
+  res.json(all<Record<string, unknown>>('xhs-api-tasks').map(({ result, ...task }) => task)),
+);
+app.put('/api/xhs-data/tasks', (req, res) => {
+  if (active()) {
+    res.status(409).json({ error: '请先停止当前任务' });
+    return;
+  }
+  const input = z
+    .object({ id: z.string(), taskId: z.string().trim().min(1).max(200) })
+    .strict()
+    .parse(req.body);
+  const task = get<{ id: string; taskId?: string }>('xhs-api-tasks', input.id);
+  if (!task || task.taskId) {
+    res.status(409).json({ error: '只能补填提交结果不确定的任务编号' });
+    return;
+  }
+  put('xhs-api-tasks', { ...task, taskId: input.taskId, state: 'pending' });
+  res.json({ ok: true });
+});
 app.get('/api/settings', (_req, res) => res.json(settings()));
 app.put('/api/settings', (req, res) => {
   const input = z
@@ -991,6 +949,10 @@ app.delete('/api/accounts/:id', (req, res) => {
   res.json({ ok: true });
 });
 app.post('/api/settings/test', async (_req, res) => {
+  if (settings().platform === 'xiaohongshu') {
+    res.status(400).json({ error: '请使用小红书 API 数据源面板中的测试按钮' });
+    return;
+  }
   if (settings().connectionType === 'browser') {
     const c = await browserCall<{ status: string }>('/status', { platform: settings().platform });
     res.json({ ok: c.status === 'ready', ...c });
@@ -999,6 +961,15 @@ app.post('/api/settings/test', async (_req, res) => {
   res.json(await providerCall('/health', {}, schemas.health));
 });
 const platformEnum = z.enum(['xiaohongshu', 'douyin']);
+app.use('/api/platforms/:platform', (req, res, next) => {
+  if (req.params.platform === 'xiaohongshu') {
+    res
+      .status(410)
+      .json({ error: '小红书已关闭浏览器连接，请在小红书 API 数据源面板配置 TikHub / RedFox' });
+    return;
+  }
+  next();
+});
 app.get('/api/protection', (_req, res) =>
   res.json({
     platforms: Object.fromEntries(
@@ -1008,7 +979,7 @@ app.get('/api/protection', (_req, res) =>
 );
 app.put('/api/protection/:platform', (req, res) => {
   const platform = platformEnum.parse(req.params.platform);
-  if (active() || publishing.size) {
+  if (active()) {
     res.status(409).json({ error: '请先暂停正在执行的任务，再修改采集额度与间隔' });
     return;
   }
@@ -1017,7 +988,7 @@ app.put('/api/protection/:platform', (req, res) => {
 });
 app.post('/api/platforms/:platform/resume', async (req, res) => {
   const platform = platformEnum.parse(req.params.platform);
-  if (settings().connectionType === 'browser') {
+  if (platform !== 'xiaohongshu' && settings().connectionType === 'browser') {
     const state = await browserCall<{
       state: { status: string };
       pages: { text: string; frames: { text: string; visible?: boolean }[] }[];
@@ -1078,6 +1049,12 @@ app.post('/api/notes/:id/detail', async (req, res) => {
   const n = get<Note>('notes', String(req.params.id));
   if (!n) {
     res.status(404).json({ error: '作品不存在' });
+    return;
+  }
+  if (n.source === 'live' && n.platform === 'xiaohongshu') {
+    const detail = await xhsClient().detail(n);
+    put('notes', detail);
+    res.json(detail);
     return;
   }
   if (n.source === 'demo' || settings().connectionType === 'http') {

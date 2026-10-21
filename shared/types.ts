@@ -108,6 +108,7 @@ export interface Log {
   message: string;
 }
 export interface Job {
+  dataProvider?: string;
   searchEvidence?: {
     sort: SearchInput['sort'];
     path: string;

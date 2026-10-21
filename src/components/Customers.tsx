@@ -1,3 +1,4 @@
+import { CollectedWorkPicker } from './CollectedWorkPicker';
 import { SalesWorkbench, SalesMetrics } from './SalesWorkbench';
 import { AssessmentDetails } from './AssessmentDetails';
 import { useState, useMemo } from 'react';
@@ -29,8 +30,10 @@ import { assessComment } from '../../server/domain';
 export function Comments() {
   const { data, refresh, notify, navigate, commentNoteId, setCommentNoteId } = useWorkspace();
   const jobs = data.jobs.filter((j) => j.type === 'comments');
-  const job = jobs.find((j) => j.noteId === commentNoteId) || jobs[0];
-  const [noteId, setNoteId] = useState(commentNoteId || job?.noteId || data.notes[0]?.id || ''),
+  const initialJob = jobs.find((j) => j.noteId === commentNoteId) || jobs[0];
+  const [noteId, setNoteId] = useState(
+      commentNoteId || initialJob?.noteId || data.notes[0]?.id || '',
+    ),
     [limit, setLimit] = useState(60),
     [interval, setInterval] = useState(data.settings.mode === 'live' ? 250 : 1000),
     [query, setQuery] = useState(''),
@@ -40,6 +43,7 @@ export function Comments() {
     [selected, setSelected] = useState<string[]>([]),
     [busy, setBusy] = useState(false),
     [focused, setFocused] = useState<Comment | null>(null);
+  const job = jobs.find((j) => j.noteId === noteId);
   const comments = useMemo(() => {
     const ids = new Set(job?.resultIds || []);
     return data.comments
@@ -138,16 +142,14 @@ export function Comments() {
             <h2>评论采集</h2>
             <span>02</span>
           </div>
-          <label className="field-label" htmlFor="comment-note">
-            目标作品
-          </label>
-          <select id="comment-note" value={noteId} onChange={(e) => setNoteId(e.target.value)}>
-            {data.notes.map((n) => (
-              <option value={n.id} key={n.id}>
-                {n.title}
-              </option>
-            ))}
-          </select>
+          <CollectedWorkPicker
+            value={noteId}
+            onChange={(id) => {
+              setNoteId(id);
+              setCommentNoteId(id);
+              setSelected([]);
+            }}
+          />
           <div className="field-hint">也可以在作品卡片上点击「一键采集客户」。</div>
           <label className="field-label" htmlFor="comment-note-id">
             笔记 ID

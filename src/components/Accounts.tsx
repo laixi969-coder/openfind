@@ -30,7 +30,7 @@ export function AccountForm({
         rememberCookie: remember,
       });
       await refresh();
-      notify('发布账号已添加');
+      notify('账号备注已添加');
       onCreated?.(a);
       onClose();
     } catch (e) {
@@ -40,7 +40,7 @@ export function AccountForm({
     }
   }
   return (
-    <Modal title="添加发布账号" sub="为你的内容选择合适的发布身份" onClose={onClose}>
+    <Modal title="添加账号备注" sub="记录草稿拟使用的账号，发布由你手动完成" onClose={onClose}>
       <form
         className="modal-body"
         onSubmit={(e) => {
@@ -109,7 +109,7 @@ export function AccountForm({
           <ShieldCheck size={16} />
           <div>
             <b>每个账号的凭证独立保存</b>
-            <p>发布时会再次检查服务当前账号与所选账号是否一致。</p>
+            <p>此处仅保存账号信息；请在官方平台手动发布前自行核对账号。</p>
           </div>
         </div>
         <div className="modal-action-row">

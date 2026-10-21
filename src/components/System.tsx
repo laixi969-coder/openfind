@@ -1,3 +1,4 @@
+import { XhsDataSettings } from './XhsDataSettings';
 import { LlmSettingsPanel } from './LlmSettings';
 import { useState } from 'react';
 import {
@@ -102,13 +103,14 @@ export function SettingsPage() {
         title="连接数据，让发现走得更远。"
         description="管理平台账号与数据服务，所有配置和凭证均保存在你的本机。"
       />
+      <XhsDataSettings />
       <PlatformConnections />
       <LlmSettingsPanel />
       <div className="settings-layout">
         <section className="panel settings-form">
           <div className="section-title">
             <Plug size={18} />
-            <h2>运行与高级连接设置</h2>
+            <h2>运行与抖音高级连接设置</h2>
           </div>
           <label className="field-label">运行模式</label>
           <div className="mode-options">
@@ -131,12 +133,12 @@ export function SettingsPage() {
                 <Globe size={17} />
                 真实模式
               </span>
-              <p>使用已登录的平台浏览器或授权数据服务</p>
+              <p>小红书使用 API，抖音使用现有连接</p>
               {form.mode === 'live' && <Check size={15} />}
             </button>
           </div>
           <label className="field-label" htmlFor="connection-type">
-            连接方式
+            抖音连接方式
           </label>
           <select
             id="connection-type"
@@ -159,7 +161,7 @@ export function SettingsPage() {
             placeholder="http://127.0.0.1:9000"
           />
           <p className="field-hint">
-            服务需实现 OpenFind 适配器协议：/health、/search、/comments、/publish。
+            服务需实现 OpenFind 适配器协议：/health、/search、/comments。
           </p>
           <label className="field-label" htmlFor="provider-token">
             服务访问令牌<span>{form.hasToken ? '已加密保存' : '可选'}</span>
@@ -380,7 +382,8 @@ export function SettingsPage() {
             <Server size={21} />
             <h3>接入真实数据</h3>
             <p>
-              真实模式可使用内置平台浏览器：扫码登录后，从官方页面获取数据并发布。平台要求验证时，需要由本人完成。也可接入自己的授权数据服务。
+              小红书使用 TikHub / RedFox API，无需扫码或
+              Cookie；抖音沿用内置浏览器或现有数据服务。发送与发布由用户自行完成。
             </p>
             <p className="field-hint">适配器完整字段及调用示例已随项目提供：docs/ADAPTER.md</p>
             <button
@@ -610,7 +613,9 @@ export function Guide({ onClose }: { onClose: () => void }) {
           <li>在卡片上选择「一键克隆」，编辑图片、文案和话题，保存草稿。</li>
           <li>选择「一键采集客户」，查看一级评论和楼中楼回复。</li>
           <li>把高意向评论保存为客户线索，记录跟进并准备沟通话术。</li>
-          <li>在「连接设置」打开对应平台并扫码登录后，可进行真实搜索、评论采集与发布。</li>
+          <li>
+            在「连接设置」打开对应平台并扫码登录后，可手动触发搜索、评论采集；内容请复制或导出后自行发布。
+          </li>
         </ol>
         <p className="guide-footnote">
           任务助手使用本地规则解析；意向评分使用可解释的关键词规则。完整逐页分析、架构与接口说明位于项目

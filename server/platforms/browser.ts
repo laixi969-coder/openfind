@@ -111,6 +111,8 @@ async function observeIdentity(s: Session, response: Response) {
   } catch {}
 }
 export async function openLogin(platform: Platform): Promise<Session> {
+  if (platform === 'xiaohongshu')
+    throw new Error('小红书已关闭模拟浏览，请在设置配置 TikHub / RedFox API');
   const existing = sessions.get(platform);
   if (existing && !existing.page.isClosed()) {
     if (existing.page.url().startsWith('chrome-error:'))

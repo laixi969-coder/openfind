@@ -31,6 +31,19 @@ app.use((req, res, next) => {
   }
   next();
 });
+// Xiaohongshu is API-only, including legacy login, inbox and detail routes.
+app.use((req, res, next) => {
+  if ((req.body?.platform || req.body?.note?.platform) === 'xiaohongshu') {
+    res
+      .status(410)
+      .json({
+        error:
+          '小红书已改用 API 数据源，已关闭模拟浏览、自动采集及互动；请到设置配置 TikHub / RedFox',
+      });
+    return;
+  }
+  next();
+});
 const platform = z.enum(['xiaohongshu', 'douyin']);
 app.get('/connections', (_req, res) =>
   res.json(['xiaohongshu', 'douyin'].map((p) => connection(platform.parse(p)))),
@@ -110,36 +123,11 @@ app.post('/creator', async (req, res) => {
   await openCreator(platform.parse(req.body.platform));
   res.json({ ok: true });
 });
-app.post('/prepare-publish', async (req, res) =>
-  res.json(
-    await (
-      await import(
-        './platforms/publish.ts?revision=' +
-          statSync(new URL('./platforms/publish.ts', import.meta.url)).mtimeMs
-      )
-    ).preparePublish(req.body),
-  ),
-);
-app.post('/reconcile-publish', async (req, res) =>
-  res.json(
-    await (
-      await import(
-        './platforms/publish.ts?revision=' +
-          statSync(new URL('./platforms/publish.ts', import.meta.url)).mtimeMs
-      )
-    ).reconcilePublish(req.body),
-  ),
-);
-app.post('/publish', async (req, res) =>
-  res.json(
-    await (
-      await import(
-        './platforms/publish.ts?revision=' +
-          statSync(new URL('./platforms/publish.ts', import.meta.url)).mtimeMs
-      )
-    ).publishNative(req.body),
-  ),
-);
+for (const path of ['/prepare-publish', '/reconcile-publish', '/publish']) {
+  app.post(path, (_req, res) =>
+    res.status(410).json({ error: '平台代发与代填已取消，请手动发布。' }),
+  );
+}
 app.post('/close-read', async (req, res) => {
   await closeRead(String(req.body.cursor));
   res.json({ ok: true });

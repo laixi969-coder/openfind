@@ -65,7 +65,7 @@ test('Private conversation binding rejects a nickname match without exact platfo
   });
   const r = await req(
     '/inbox/threads/' + t.id,
-    { revision: t.revision, watching: true, autoSuggest: false, stopped: false, leadId: 'wrong' },
+    { revision: t.revision, watching: false, autoSuggest: false, stopped: false, leadId: 'wrong' },
     'PUT',
   );
   assert.equal(r.status, 500);
@@ -90,7 +90,7 @@ test('New incoming messages invalidate a pending draft and prevent an external s
     text: d.text,
     contextHash: d.contextHash,
   });
-  assert.equal(r.status, 500);
+  assert.equal(r.status, 410);
   assert.equal(called, 0);
   assert.equal(get<ReplyDraft>('replyDrafts', d.id)?.status, 'stale');
 });
@@ -112,83 +112,50 @@ test('Customer opt-out blocks manual drafts even for an unbound conversation', a
   assert.equal(r.status, 500);
   assert.match((await r.json()).error, /停止联系/);
 });
-test('Send requires explicit exact-text approval; unknown result is never retried', async () => {
-  const t = mergeNative(native('sender'))[0];
+test('Sending is disabled even with exact confirmation; drafts remain copyable', async () => {
+  const t = mergeNative(native('manual-only'))[0];
   const d = await (
     await req('/inbox/threads/' + t.id + '/drafts', {
       revision: t.revision,
-      text: '已准备蓝色款式资料',
+      text: '请手动发送这条草稿',
     })
   ).json();
   let calls = 0;
   inboxTransport.call = async () => {
     calls++;
-    throw new Error('connection lost');
+    return native();
   };
-  assert.equal(
-    (
-      await req('/inbox/drafts/' + d.id + '/send', {
-        confirmed: true,
-        text: 'edited',
-        contextHash: d.contextHash,
-      })
-    ).status,
-    500,
-  );
+  for (let i = 0; i < 2; i++) {
+    const r = await req('/inbox/drafts/' + d.id + '/send', {
+      confirmed: true,
+      text: d.text,
+      contextHash: d.contextHash,
+    });
+    assert.equal(r.status, 410);
+  }
   assert.equal(calls, 0);
-  assert.equal(
-    (
-      await req('/inbox/drafts/' + d.id + '/send', {
-        confirmed: true,
-        text: d.text,
-        contextHash: d.contextHash,
-      })
-    ).status,
-    409,
+  assert.equal(get<ReplyDraft>('replyDrafts', d.id)?.status, 'pending');
+});
+test('Legacy watching cannot poll or re-enable account hosting', async () => {
+  const t = mergeNative(native('legacy-watch'))[0];
+  put('inboxThreads', { ...t, watching: true, autoSuggest: true });
+  let calls = 0;
+  inboxTransport.call = async () => {
+    calls++;
+    return native();
+  };
+  await pollInbox();
+  await pollInbox();
+  assert.equal(calls, 0);
+  const r = await req(
+    '/inbox/threads/' + t.id,
+    { revision: t.revision, watching: true, autoSuggest: true, stopped: false },
+    'PUT',
   );
-  assert.equal(calls, 1);
-  assert.equal(get<ReplyDraft>('replyDrafts', d.id)?.status, 'unknown');
-  await req('/inbox/drafts/' + d.id + '/send', {
-    confirmed: true,
-    text: d.text,
-    contextHash: d.contextHash,
-  });
-  assert.equal(calls, 1);
-});
-test('Verified receipt is recorded once; repeated approval does not send twice', async () => {
-  const t = mergeNative(native('success'))[0];
-  const d = await (
-    await req('/inbox/threads/' + t.id + '/drafts', {
-      revision: t.revision,
-      text: '收到，我核对一下',
-    })
-  ).json();
-  let calls = 0;
-  inboxTransport.call = async () => {
-    calls++;
-    return native('success', [
-      msg('peer.me.1'),
-      { ...msg('success.peer.2', d.text), direction: 'outgoing' },
-    ]);
-  };
-  const body = { confirmed: true, text: d.text, contextHash: d.contextHash };
-  assert.equal((await req('/inbox/drafts/' + d.id + '/send', body)).status, 200);
-  assert.equal(get<ReplyDraft>('replyDrafts', d.id)?.status, 'sent');
-  await req('/inbox/drafts/' + d.id + '/send', body);
-  assert.equal(calls, 1);
-});
-test('Sync failure pauses a watched thread instead of endlessly polling', async () => {
-  const t = mergeNative(native('pause'))[0];
-  put('inboxThreads', { ...t, watching: true });
-  let calls = 0;
-  inboxTransport.call = async () => {
-    calls++;
-    throw new Error('官方验证码等待本人完成');
-  };
-  await pollInbox();
-  await pollInbox();
-  assert.equal(calls, 1);
-  assert.match(get<any>('inboxThreads', t.id).error, /验证码/);
+  assert.equal(r.status, 410);
+  const merged = mergeNative(native('legacy-watch'))[0];
+  assert.equal(merged.watching, false);
+  assert.equal(merged.autoSuggest, false);
 });
 
 test('XHS uses the same participant prefix for both directions; official bubble markers decide sender', async () => {
@@ -222,9 +189,14 @@ test('Unknown sends can be reconciled by fresh official read without a second su
     ]);
   };
   const body = { confirmed: true, text: d.text, contextHash: d.contextHash };
-  assert.equal((await req('/inbox/drafts/' + d.id + '/send', body)).status, 409);
+  put('replyDrafts', {
+    ...d,
+    status: 'unknown',
+    beforeMessageIds: t.messages.map((m) => m.nativeId),
+  });
+  assert.equal((await req('/inbox/drafts/' + d.id + '/send', body)).status, 410);
   assert.equal((await req('/inbox/drafts/' + d.id + '/reconcile', {})).status, 200);
-  assert.equal(sends, 1);
+  assert.equal(sends, 0);
   assert.equal(reads, 1);
   assert.equal(get<ReplyDraft>('replyDrafts', d.id)?.status, 'sent');
 });
@@ -367,36 +339,31 @@ test('Douyin binds a lead using public peer identity, never conversation ID or n
   assert.equal(r.status, 200);
   assert.equal((await r.json()).leadId, 'douyin-exact');
 });
-test('Wrong-account and ambiguous send receipts remain unknown and cannot be resubmitted', async () => {
-  for (const mode of ['wrong-account', 'duplicate']) {
-    const t = mergeNative(native('receipt-' + mode))[0];
-    const d = await (
-      await req('/inbox/threads/' + t.id + '/drafts', {
-        revision: t.revision,
-        text: 'receipt test',
-      })
-    ).json();
-    inboxTransport.call = async () =>
-      native(mode === 'wrong-account' ? 'different' : t.accountId, [
-        ...t.messages,
-        { ...msg('receipt-new-1', d.text), direction: 'outgoing' },
-        ...(mode === 'duplicate'
-          ? [{ ...msg('receipt-new-2', d.text), direction: 'outgoing' as const }]
-          : []),
-      ]);
-    const r = await req('/inbox/drafts/' + d.id + '/send', {
-      confirmed: true,
-      text: d.text,
-      contextHash: d.contextHash,
-    });
-    assert.equal(r.status, 409);
-    assert.equal(get<ReplyDraft>('replyDrafts', d.id)?.status, 'unknown');
-  }
-});
 test('Douyin mutual-follow notice is not a real customer reply', async () => {
   const t = mergeNative(
     native('dy-greeting', [msg('greeting', '我们已互相关注，可以开始聊天了')]),
   )[0];
   const r = await req('/inbox/threads/' + t.id + '/suggest', { confirmContextToModel: true });
   assert.match((await r.json()).error, /真实来信/);
+});
+
+test('Native entry points cannot send, fill or publish even when called directly', async () => {
+  const { messaging } = await import('../server/platforms/messages.ts');
+  const { preparePublish, publishNative } = await import('../server/platforms/publish.ts');
+  for (const platform of ['xiaohongshu', 'douyin']) {
+    await assert.rejects(
+      messaging({
+        platform,
+        operation: 'send',
+        accountId: 'a',
+        nativeId: 'b',
+        text: 'blocked',
+        expectedHash: 'hash',
+      }),
+      /发送已取消/,
+    );
+  }
+  for (const action of [preparePublish, publishNative]) {
+    await assert.rejects(action({} as any), /代发与代填已取消/);
+  }
 });

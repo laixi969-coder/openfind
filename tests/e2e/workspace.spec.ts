@@ -34,13 +34,13 @@ test('complete discovery → image pack → multi-account creation → comments 
   const editor = page.getByRole('dialog', { name: '克隆创作', exact: true });
   await expect(editor).toBeVisible();
   await editor.getByRole('button', { name: '添加账号', exact: true }).click();
-  const account = page.getByRole('dialog', { name: '添加发布账号' });
+  const account = page.getByRole('dialog', { name: '添加账号备注' });
   await expect(account).toBeVisible();
   await account.getByLabel('账号名称').fill('品牌测试账号');
   await account.getByLabel('平台账号 ID').fill('e2e-brand');
   await account.getByRole('button', { name: '添加账号', exact: true }).click();
   await expect(account).not.toBeVisible();
-  await expect(editor.getByLabel('发布账号')).toHaveValue('e2e-brand');
+  await expect(editor.getByLabel('拟用账号（备注）')).toHaveValue('e2e-brand');
   await editor.getByLabel('标题', { exact: false }).fill('我的第一篇原创提案');
   await editor
     .getByLabel('正文', { exact: false })
@@ -63,8 +63,8 @@ test('complete discovery → image pack → multi-account creation → comments 
   await expect(editor.locator('.publish-preview')).toBeVisible();
   await editor.getByRole('button', { name: '保存草稿', exact: true }).click();
   await expect(page.getByRole('status')).toContainText('已保存');
-  await editor.getByRole('button', { name: '模拟发布', exact: true }).click();
-  await expect(editor.getByText('模拟发布完成', { exact: true })).toBeVisible();
+  await expect(editor.getByRole('button', { name: '复制发布文案', exact: true })).toBeVisible();
+  await expect(editor.getByRole('button', { name: '发布作品', exact: true })).toHaveCount(0);
   await page.screenshot({ path: screenshot('02-editor') });
   await editor.getByRole('button', { name: '关闭', exact: true }).click();
   await page.locator('.note-card').first().hover();
@@ -170,7 +170,7 @@ test('collection budgets can be edited independently and survive reload', async 
   await page.reload();
   await expect(page.getByLabel('抖音搜索每日批次数')).toHaveValue('125');
   await expect(page.getByLabel('抖音评论采集间隔秒数')).toHaveValue('22');
-  await expect(page.getByLabel('小红书搜索每日批次数')).toHaveValue('100');
+  await expect(page.getByLabel('每个采集步骤最多请求次数（1–100）')).toHaveValue('20');
   await expect(page.getByLabel('抖音采集额度')).toContainText('每日 UTC 00:00 重置');
 });
 

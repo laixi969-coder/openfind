@@ -161,7 +161,7 @@ test('comment replies retain parent relationships; leads are idempotent and edit
   );
   assert.equal((await state()).leads.find((l) => l.id === lead.id)?.status, 'qualified');
 });
-test('draft validation, local ZIP, demo publish receipt and duplicate prevention', async () => {
+test('draft validation and ZIP export remain available while platform publishing is disabled', async () => {
   const n = (await state()).notes.find((n) => n.type === 'image')!;
   const input = {
     noteId: n.id,
@@ -179,12 +179,12 @@ test('draft validation, local ZIP, demo publish receipt and duplicate prevention
   const bundle = await request('/api/drafts/' + d.id + '/bundle');
   assert.equal(bundle.headers.get('content-type'), 'application/zip');
   assert.ok((await bundle.arrayBuffer()).byteLength > 1000);
-  const published = await json<Draft>('/api/drafts/' + d.id + '/publish', {});
-  assert.equal(published.status, 'demo_published');
-  assert.ok(published.receipt?.startsWith('demo-receipt-'));
-  assert.equal((await request('/api/drafts/' + d.id + '/publish', {})).status, 409);
-  const fork = await json<Draft>('/api/drafts', { ...input, id: d.id, title: '修改后另存' });
-  assert.notEqual(fork.id, d.id);
+  for (const action of ['publish', 'prepare', 'reconcile']) {
+    assert.equal((await request(`/api/drafts/${d.id}/${action}`, {})).status, 410);
+  }
+  assert.equal((await state()).drafts.find((x) => x.id === d.id)?.status, 'draft');
+  const updated = await json<Draft>('/api/drafts', { ...input, id: d.id, title: '修改后保存' });
+  assert.equal(updated.id, d.id);
 });
 test('credentials encrypted at rest and never returned, session-only preference clears disk copy', async () => {
   const s = (await state()).settings;
@@ -232,7 +232,7 @@ test('multiple accounts keep credentials separate and can be selected for publis
     visibility: 'public',
     accountId: a.id,
   });
-  assert.equal((await request('/api/drafts/' + d.id + '/publish', {})).status, 200);
+  assert.equal((await request('/api/drafts/' + d.id + '/publish', {})).status, 410);
   assert.ok(!JSON.stringify(await state()).includes('brand-cookie-secret'));
 });
 test('CSV escapes spreadsheet formulas and unknown exports return an error', async () => {
@@ -263,6 +263,7 @@ test('live adapter handles pagination, dedup, throttling, account preflight and 
     times.push(Date.now());
     const n = {
       ...sample,
+      platform: 'douyin',
       id: req.body.cursor ? 'live-two' : 'live-one',
       source: undefined,
       url: 'https://www.xiaohongshu.com/explore/test',
@@ -286,6 +287,7 @@ test('live adapter handles pagination, dedup, throttling, account preflight and 
       '/api/settings',
       {
         ...s,
+        platform: 'douyin',
         mode: 'live',
         connectionType: 'http',
         providerUrl: 'http://127.0.0.1:' + (ms.address() as { port: number }).port,
@@ -297,6 +299,7 @@ test('live adapter handles pagination, dedup, throttling, account preflight and 
     );
     const j = await json<Job>('/api/jobs', {
       ...search,
+      platform: 'douyin',
       mode: 'live',
       keyword: '真实测试',
       interval: 500,
@@ -308,6 +311,7 @@ test('live adapter handles pagination, dedup, throttling, account preflight and 
     assert.ok(times[1] - times[0] >= 14800);
     const cachedJob = await json<Job>('/api/jobs', {
       ...search,
+      platform: 'douyin',
       mode: 'live',
       keyword: '真实测试',
       interval: 500,
@@ -332,17 +336,15 @@ test('live adapter handles pagination, dedup, throttling, account preflight and 
       visibility: 'public',
       accountId: 'live-account',
     });
-    const result = await json<Draft>('/api/drafts/' + d.id + '/publish', {});
-    assert.equal(result.status, 'published');
-    assert.equal(result.receipt, 'https://www.xiaohongshu.com/explore/published-test');
-    assert.equal(publications, 1);
+    assert.equal((await request('/api/drafts/' + d.id + '/publish', {})).status, 410);
+    assert.equal(publications, 0);
     await json(
       '/api/settings',
       { ...(await state()).settings, providerUrl: 'http://127.0.0.1:1' },
       'PUT',
     );
     await new Promise((r) => setTimeout(r, 15000));
-    const broken = await json<Job>('/api/jobs', { ...search, mode: 'live' });
+    const broken = await json<Job>('/api/jobs', { ...search, platform: 'douyin', mode: 'live' });
     assert.equal((await waitJob(broken.id)).status, 'failed');
   } finally {
     await new Promise<void>((r) => ms.close(() => r()));
@@ -408,7 +410,7 @@ test('Collection configuration API validates input and returns budgets for each 
     'PUT',
   );
   assert.deepEqual(result.policy, policy);
-  assert.equal(result.budgets.search.remaining, 150);
+  assert.equal(result.budgets.search.remaining, 150 - result.counts.search);
   const status = await json<{
     platforms: Record<string, import('../shared/types.ts').ProtectionView>;
   }>('/api/protection');

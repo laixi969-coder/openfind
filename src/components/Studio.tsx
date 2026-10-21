@@ -56,7 +56,7 @@ export function Studio() {
             </button>
             <button className="btn primary" onClick={newDraft}>
               <Plus size={16} />
-              原创发布
+              原创草稿
             </button>
           </div>
         }
@@ -67,7 +67,7 @@ export function Studio() {
         </span>
         <div>
           <h3>好内容，值得再向前一步。</h3>
-          <p>发现灵感 → 克隆为草稿 → 编辑图文 → 检查账号与发布</p>
+          <p>发现灵感 → 克隆为草稿 → 编辑图文 → 导出并手动发布</p>
         </div>
         <span>YOUR CONTENT STUDIO</span>
       </div>
@@ -173,7 +173,6 @@ export function Editor({
   );
   const [kind, setKind] = useState<'image' | 'video'>(initial?.kind || 'image');
   const [video, setVideo] = useState(initial?.video || '');
-  const [prepared, setPrepared] = useState(false);
   const videoFile = useRef<HTMLInputElement>(null);
   const [title, setTitle] = useState(initial?.title || note?.title.slice(0, 20) || ''),
     [body, setBody] = useState(initial?.body || note?.body || ''),
@@ -204,7 +203,6 @@ export function Editor({
     (kind === 'video' ? !!video : images.length >= 1 && images.length <= 18);
   const changed = () => {
     setDirty(true);
-    setPrepared(false);
   };
   async function persist() {
     const d = await api<Draft>('/drafts', {
@@ -231,20 +229,6 @@ export function Editor({
     try {
       await persist();
       notify('图文草稿已保存到内容工作室');
-    } catch (e) {
-      notify((e as Error).message, true);
-    } finally {
-      setBusy('');
-    }
-  }
-  async function publish() {
-    setBusy('publish');
-    try {
-      const d = await persist();
-      const result = await api<Draft>(`/drafts/${d.id}/publish`, {});
-      setSaved(result);
-      await refresh();
-      notify(demo ? '模拟发布完成，未向平台发送任何内容' : '作品发布成功，回执已保存');
     } catch (e) {
       notify((e as Error).message, true);
     } finally {
@@ -294,7 +278,7 @@ export function Editor({
   const published = saved && !dirty && saved.status !== 'draft';
   return (
     <Modal
-      title={source ? '克隆创作' : '原创发布'}
+      title={source ? '克隆创作' : '原创草稿'}
       sub="保留灵感，加入你的表达。编辑、预览并保存图文作品。"
       onClose={onClose}
       wide
@@ -306,7 +290,7 @@ export function Editor({
       <div className="editor-original-options">
         <div>
           <label className="field-label" htmlFor="draft-platform">
-            发布平台
+            目标平台
           </label>
           <select
             id="draft-platform"
@@ -388,7 +372,7 @@ export function Editor({
               <p>
                 MP4 / WebM / MOV · 最大500MB
                 <br />
-                发布时将上传到你选择的官方账号。
+                保存后可下载素材，由你在官方平台上传。
               </p>
             </div>
           ) : (
@@ -453,7 +437,7 @@ export function Editor({
           )}
           <div className="editor-note">
             <ShieldCheck size={16} />
-            <p>草稿保存在本机。请在发布前确认图片、文案和发布账号。</p>
+            <p>草稿保存在本机。请在发布前确认图片、文案和拟用账号（备注）。</p>
           </div>
           {preview && (
             <div className="publish-preview">
@@ -538,7 +522,7 @@ export function Editor({
             </div>
             <div>
               <label className="field-label" htmlFor="draft-account">
-                发布账号
+                拟用账号（备注）
                 <button type="button" className="text-btn" onClick={() => setAccountDialog(true)}>
                   <Plus size={11} />
                   添加账号
@@ -562,27 +546,11 @@ export function Editor({
               </select>
             </div>
           </div>
-          <div className={`publish-status ${published ? 'success' : ''}`}>
+          <div className="publish-status">
             <ShieldCheck size={16} />
             <div>
-              <b>
-                {published
-                  ? saved.status === 'demo_published'
-                    ? '模拟发布完成'
-                    : '已发布到' + (platform === 'douyin' ? '抖音' : '小红书')
-                  : demo
-                    ? '当前为演示创作'
-                    : '发布前将检查账号和上传通道'}
-              </b>
-              <p>
-                {published
-                  ? saved.status === 'demo_published'
-                    ? '本地回执已记录，没有向平台实际发布。'
-                    : `发布回执：${saved.receipt}`
-                  : demo
-                    ? '可完整体验编辑与模拟发布，切换真实模式后可发布真实作品。'
-                    : '使用连接设置中配置的服务进行真实发布。'}
-              </p>
+              <b>保存素材，由你手动发布</b>
+              <p>生成和编辑在本机完成。复制文案、下载素材包，再到官方平台自行上传发布。</p>
             </div>
           </div>
         </section>
@@ -596,28 +564,6 @@ export function Editor({
             <ArrowLeft size={14} />
             返回作品列表
           </button>
-          {saved && !demo && data.settings.connectionType === 'browser' && (
-            <button
-              className="btn"
-              disabled={!!busy}
-              onClick={() => {
-                setBusy('reconcile');
-                void api<{ status: string; message?: string }>(`/drafts/${saved.id}/reconcile`, {})
-                  .then(async (r) => {
-                    await refresh();
-                    notify(
-                      r.status === 'published'
-                        ? '已从官方作品管理核对发布成功'
-                        : r.message || '请查看官方作品管理',
-                    );
-                  })
-                  .catch((e) => notify((e as Error).message, true))
-                  .finally(() => setBusy(''));
-              }}
-            >
-              {busy === 'reconcile' ? <Busy text="核对中" /> : '核对发布结果'}
-            </button>
-          )}
           {saved && (
             <a className="icon-btn" title="下载图文包" href={`/api/drafts/${saved.id}/bundle`}>
               <Download size={16} />
@@ -633,49 +579,29 @@ export function Editor({
               </>
             )}
           </button>
-          {!demo && (
-            <button
-              className="btn"
-              disabled={!!busy || !valid || !accountId || !!published}
-              onClick={() => {
-                setBusy('prepare');
-                void (async () => {
-                  try {
-                    const d = await persist();
-                    const r = await api<{ message: string }>(`/drafts/${d.id}/prepare`, {});
-                    setPrepared(true);
-                    notify(r.message);
-                  } catch (e) {
-                    notify((e as Error).message, true);
-                  } finally {
-                    setBusy('');
-                  }
-                })();
-              }}
-            >
-              {busy === 'prepare' ? (
-                <Busy text="填入平台中" />
-              ) : (
-                <>
-                  <Eye size={14} />
-                  {prepared ? '已在平台预览' : '在平台预览'}
-                </>
-              )}
-            </button>
-          )}
           <button
             className="btn primary"
-            disabled={!!busy || !valid || !!published || !accountId}
-            onClick={() => void publish()}
+            disabled={!!busy || !title.trim()}
+            onClick={() =>
+              void navigator.clipboard
+                .writeText(
+                  [
+                    title,
+                    body,
+                    tags
+                      .split(/\s+/)
+                      .filter(Boolean)
+                      .map((t) => (t.startsWith('#') ? t : '#' + t))
+                      .join(' '),
+                  ].join('\n\n'),
+                )
+                .then(
+                  () => notify('文案已复制，请到官方平台手动发布'),
+                  () => notify('复制失败，请手动复制文案', true),
+                )
+            }
           >
-            {busy === 'publish' ? (
-              <Busy text="发布检查中" />
-            ) : (
-              <>
-                <Send size={14} />
-                {demo ? '模拟发布' : '发布作品'}
-              </>
-            )}
+            复制发布文案
           </button>
         </div>
       </footer>

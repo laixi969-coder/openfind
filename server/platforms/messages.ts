@@ -91,6 +91,7 @@ async function readMessages(
 }
 export async function messaging(input: unknown): Promise<NativeInbox> {
   const args = operationSchema.parse(input);
+  if (args.operation === 'send') throw new Error('平台发送已取消，请复制草稿后手动发送。');
   if (args.platform === 'douyin') return dyMessaging(args);
   const { session, page } = await inboxPage(args.platform);
   const accountId = session.state.accountId!;
@@ -131,46 +132,7 @@ export async function messaging(input: unknown): Promise<NativeInbox> {
     result.threads.push(row);
   }
   result.selected = { nativeId: args.nativeId, messages };
-  if (args.operation === 'send') {
-    if (!args.text || !args.expectedHash || transcriptHash(messages) !== args.expectedHash)
-      throw new Error('会话已变化，请重新查看并确认回复');
-    const editor = page.locator('.xhs-im-input-bar-editor[contenteditable="true"]');
-    if ((await editor.count()) !== 1 || !(await editor.isVisible()))
-      throw new Error('官方消息输入框不可用');
-    if ((await editor.innerText()).trim())
-      throw new Error('官方输入框已有未发送内容，请本人处理后重试');
-    if (session.state.accountId !== accountId) throw new Error('登录账号已变化');
-    await assertInboxPage(page, args.platform);
-    await editor.fill(args.text);
-    // Submit once; an unknown result must be reconciled instead of retried.
-    await editor.press('Enter');
-    const previousIds = new Set(messages.map((m) => m.nativeId));
-    for (let attempt = 0; attempt < 12; attempt++) {
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      const after = await readMessages(page, accountId, args.nativeId);
-      const receipts = after.filter(
-        (m) => m.direction === 'outgoing' && m.text === args.text && !previousIds.has(m.nativeId),
-      );
-      if (receipts.length === 1) {
-        // Reload the official page and read back the same ID; an optimistic
-        // bubble immediately after Enter is not sufficient evidence of acceptance.
-        const receiptId = receipts[0].nativeId;
-        await page.reload({ waitUntil: 'domcontentloaded', timeout: 45000 });
-        await page.locator('.xhs-im-conv-list').waitFor({ timeout: 20000 });
-        const confirmed = await readMessages(page, accountId, args.nativeId);
-        if (
-          !confirmed.some(
-            (m) => m.nativeId === receiptId && m.direction === 'outgoing' && m.text === args.text,
-          )
-        )
-          throw new Error('刷新官方会话后未能核对发送结果');
-        result.selected = { nativeId: args.nativeId, messages: confirmed };
-        return result;
-      }
-      if (receipts.length > 1) throw new Error('平台出现多条匹配消息，请人工核对');
-    }
-    throw new Error('未观察到唯一平台消息标识，请人工核对，不能重发');
-  }
+
   return result;
 }
 async function assertInboxPage(page: Page, platform: Platform) {
@@ -278,44 +240,5 @@ async function dyMessaging(args: z.infer<typeof operationSchema>): Promise<Nativ
   const messages = await dyRead(page, accountId, args.nativeId);
   result.threads = await dyList(page, accountId);
   result.selected = { nativeId: args.nativeId, messages };
-  if (args.operation !== 'send') return result;
-  if (!args.text || !args.expectedHash || transcriptHash(messages) !== args.expectedHash)
-    throw new Error('会话已变化，请重新查看并确认回复');
-  const editor = page.locator(
-    '[data-stack-layer="chat"] [data-slate-editor="true"][contenteditable="true"]',
-  );
-  if ((await editor.count()) !== 1 || !(await editor.isVisible()))
-    throw new Error('抖音官方消息输入框不可用');
-  if ((await editor.innerText()).replace(/[\u200b-\u200d\ufeff]/g, '').trim())
-    throw new Error('官方输入框已有未发送内容，请本人处理后重试');
-  if (session.state.accountId !== accountId) throw new Error('登录账号已变化');
-  await assertInboxPage(page, 'douyin');
-  await editor.fill(args.text);
-  await editor.press('Enter'); // Submit once only. Unknown outcomes never retry.
-  const previousIds = new Set(messages.map((m) => m.nativeId));
-  for (let i = 0; i < 8; i++) {
-    await page.waitForTimeout(700);
-    const after = await dyRead(page, accountId, args.nativeId);
-    const receipts = after.filter(
-      (m) => m.direction === 'outgoing' && m.text === args.text && !previousIds.has(m.nativeId),
-    );
-    if (receipts.length > 1) throw new Error('平台出现多条匹配消息，请人工核对');
-    if (receipts.length === 1) {
-      await page.reload({ waitUntil: 'domcontentloaded', timeout: 45000 });
-      await dyList(page, accountId);
-      const confirmed = await dyRead(page, accountId, args.nativeId);
-      if (
-        !confirmed.some(
-          (m) =>
-            m.nativeId === receipts[0].nativeId &&
-            m.direction === 'outgoing' &&
-            m.text === args.text,
-        )
-      )
-        throw new Error('刷新抖音官方会话后未能核对发送结果');
-      result.selected = { nativeId: args.nativeId, messages: confirmed };
-      return result;
-    }
-  }
-  throw new Error('未取得唯一抖音平台发送回执，请核对，不能重发');
+  return result;
 }

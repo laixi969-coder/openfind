@@ -485,23 +485,29 @@ export function Discover() {
               onClick={() => setAdvanced((v) => !v)}
             >
               <ShieldCheck size={14} />
-              账号与 Cookie 设置
+              {platform === 'xiaohongshu' ? 'API 数据源设置' : '账号与 Cookie 设置'}
               <ChevronDown size={14} className={advanced ? 'rotate' : ''} />
             </button>
             {advanced && (
               <div className="credential-box">
-                <p>Cookie 仅在服务端使用。勾选记住后，通过 AES-256-GCM 加密保存在本机。</p>
+                <p>
+                  {platform === 'xiaohongshu'
+                    ? '小红书通过 TikHub / RedFox API 采集，无需 Cookie。模拟浏览采集可能导致账号限制甚至封号。'
+                    : 'Cookie 仅在服务端使用。勾选记住后，通过 AES-256-GCM 加密保存在本机。'}
+                </p>
                 <button type="button" className="text-btn" onClick={() => navigate('settings')}>
                   配置账号与连接
                   <ArrowUpRight size={13} />
                 </button>
-                <details>
-                  <summary>Cookie 在哪里复制？</summary>
-                  <p>
-                    登录你自己的平台账号，在开发者工具的 Network 中查看请求头
-                    Cookie。请仅在连接设置内填写，不要放入任务描述。
-                  </p>
-                </details>
+                {platform === 'douyin' && (
+                  <details>
+                    <summary>Cookie 在哪里复制？</summary>
+                    <p>
+                      登录你自己的平台账号，在开发者工具的 Network 中查看请求头
+                      Cookie。请仅在连接设置内填写，不要放入任务描述。
+                    </p>
+                  </details>
+                )}
               </div>
             )}
             <label className="field-label">

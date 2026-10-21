@@ -234,7 +234,7 @@ async function waitForPlatform(
   action: 'search' | 'comments',
   signal: AbortSignal,
 ) {
-  if (w.input.mode === 'demo') return;
+  if (w.input.mode === 'demo' || w.input.platform === 'xiaohongshu') return;
   const state = protectionStatus(w.input.platform);
   // Evaluate non-timing guards first. Waiting never clears a platform pause or a quota.
   const error = evaluateBudget({ ...state, lastReadAt: undefined }, action);
@@ -371,7 +371,10 @@ export async function runWorkflow(
         abort.signal.throwIfAborted();
         if (w.searchIndex > 0) {
           if (!w.input.supplement || rankedNotes(w).length >= w.input.maxNotes) break;
-          const guard = w.input.mode === 'live' ? protectionStatus(w.input.platform) : null;
+          const guard =
+            w.input.mode === 'live' && w.input.platform !== 'xiaohongshu'
+              ? protectionStatus(w.input.platform)
+              : null;
           if (guard) {
             const blocked = evaluateBudget({ ...guard, lastReadAt: undefined }, 'search');
             if (blocked) {

@@ -118,7 +118,7 @@ export function PlatformConnections() {
         <span>本机浏览器</span>
       </div>
       <p className="connection-intro">
-        本机浏览器接入。已登录仅表示身份验证通过，不代表搜索、评论或发布权限已开通。
+        本机浏览器接入。已登录仅表示身份验证通过，不代表搜索或评论读取权限已开通。
       </p>
       {error && (
         <div className="inline-error">
@@ -127,7 +127,7 @@ export function PlatformConnections() {
         </div>
       )}
       <div className="connection-grid">
-        {(['xiaohongshu', 'douyin'] as Platform[]).map((p) => {
+        {(['douyin'] as Platform[]).map((p) => {
           const c = connections.find((c) => c.platform === p);
           const ready = c?.status === 'ready';
           return (
@@ -164,7 +164,7 @@ export function PlatformConnections() {
                       ? `操作已暂停：${protection[p].reason}`
                       : '操作保护已启用'}
                     <br />
-                    今日发布 {protection[p].counts.publish}/5 次
+                    内容与回复仅提供草稿，由你手动发布或发送
                   </p>
                   {protection[p].paused && (
                     <button

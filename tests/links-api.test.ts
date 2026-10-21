@@ -85,6 +85,40 @@ const { app } = await import('../server/index.ts');
 const { configSet, encrypt, db } = await import('../server/store.ts');
 const { saveCollectionPolicy, protectionStatus } = await import('../server/protection.ts');
 configSet('connectionType', 'browser');
+configSet('xhs.key.tikhub', encrypt('test-only-key'));
+const originalFetch = globalThis.fetch;
+const apiCalls: string[] = [];
+globalThis.fetch = async (input, init) => {
+  const url = new URL(String(input));
+  if (url.origin !== 'https://api.tikhub.io') return originalFetch(input, init);
+  apiCalls.push(url.pathname);
+  assert.equal(new Headers(init?.headers).get('Authorization'), 'Bearer test-only-key');
+  const native = 'abcdef0123456789abcdef01';
+  const data = url.pathname.endsWith('get_image_note_detail')
+    ? {
+        items: [
+          { id: native, title: '花瓶作品', desc: '桌面花瓶', interact_info: { comment_count: 2 } },
+        ],
+      }
+    : {
+        comments: [
+          {
+            id: 'comment',
+            content: '花瓶在哪里买，多少钱？',
+            create_time: Math.floor(Date.now() / 1000),
+            user_info: { user_id: 'test-buyer', nickname: '受控测试用户' },
+          },
+          {
+            id: 'old',
+            content: '想买这个花瓶',
+            create_time: 1577836800,
+            user_info: { user_id: 'old-buyer' },
+          },
+        ],
+        has_more: false,
+      };
+  return Response.json({ code: 200, data: { data } });
+};
 configSet('browserServiceToken', encrypt('test-browser-token'));
 for (const p of ['douyin', 'xiaohongshu'] as const)
   saveCollectionPolicy(p, {
@@ -112,6 +146,7 @@ async function finished(id: string) {
 after(async () => {
   await new Promise<void>((r) => server.close(() => r()));
   await new Promise<void>((r) => browser.close(() => r()));
+  globalThis.fetch = originalFetch;
   db.close();
   rmSync(dir, { recursive: true, force: true });
 });
@@ -139,11 +174,13 @@ test('Link API runs both platforms from real-mode transport through comments to 
         .length,
       0,
     );
-    assert.equal(protectionStatus(p).counts.search, 1);
-    assert.equal(protectionStatus(p).counts.comments, 1);
+    assert.equal(protectionStatus(p).counts.search, p === 'douyin' ? 1 : 0);
+    assert.equal(protectionStatus(p).counts.comments, p === 'douyin' ? 1 : 0);
   }
-  assert.equal(calls.filter((c) => c.path === '/resolve-work').length, 2);
-  assert.equal(calls.filter((c) => c.path === '/comments').length, 2);
+  assert.equal(calls.filter((c) => c.path === '/resolve-work').length, 1);
+  assert.equal(calls.filter((c) => c.path === '/comments').length, 1);
+  assert.equal(apiCalls.length, 2);
+  assert.ok(calls.every((c) => (c.body.platform || c.body.note?.platform) !== 'xiaohongshu'));
 });
 test('Invalid, mixed and oversized link batches are rejected before any browser RPC', async () => {
   const before = calls.length;

@@ -1,3 +1,4 @@
+import { xhsFingerprint } from './xhs-data.ts';
 import type { Job, SearchInput } from '../shared/types.ts';
 import { all, get, configGet } from './store.ts';
 
@@ -12,6 +13,7 @@ export function cachedJob(job: Job, input: SearchInput): Job | undefined {
       j.id !== job.id &&
       j.source === 'live' &&
       j.status === 'completed' &&
+      (input.platform !== 'xiaohongshu' || j.dataProvider === xhsFingerprint()) &&
       j.type === job.type &&
       j.platform === job.platform &&
       j.keyword === job.keyword &&
@@ -21,6 +23,7 @@ export function cachedJob(job: Job, input: SearchInput): Job | undefined {
       !(
         browser &&
         input.platform === 'xiaohongshu' &&
+        !j.dataProvider &&
         job.type === 'search' &&
         j.searchEvidence?.sortType !==
           (input.sort === 'latest'

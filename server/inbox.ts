@@ -71,8 +71,8 @@ export function mergeNative(data: NativeInbox): InboxThread[] {
       position,
       messages,
       revision: (old?.revision || 0) + (changed ? 1 : 0),
-      watching: old?.watching || false,
-      autoSuggest: old?.autoSuggest || false,
+      watching: false,
+      autoSuggest: false,
       stopped:
         old?.stopped || !!selected?.some((m) => m.direction === 'incoming' && optedOut(m.text)),
       syncedAt: new Date().toISOString(),
@@ -193,6 +193,10 @@ router.put('/inbox/threads/:id', async (req, res) => {
     })
     .strict()
     .parse(req.body);
+  if (input.watching || input.autoSuggest) {
+    res.status(410).json({ error: '自动托管已取消，请手动同步或生成草稿。' });
+    return;
+  }
   const t = thread(String(req.params.id));
   if (input.revision !== t.revision) {
     res.status(409).json({ error: '会话已变化，请刷新后设置' });
@@ -288,64 +292,8 @@ router.post('/inbox/threads/:id/drafts', (req, res) => {
   put('replyDrafts', draft);
   res.json(draft);
 });
-router.post('/inbox/drafts/:id/send', async (req, res) => {
-  const d = get<ReplyDraft>('replyDrafts', String(req.params.id));
-  if (!d) throw new Error('草稿不存在');
-  const t = thread(d.threadId);
-  assertContact(t);
-  const confirmed = z
-    .object({ confirmed: z.literal(true), text: z.string(), contextHash: z.string() })
-    .strict()
-    .parse(req.body);
-  if (
-    d.status !== 'pending' ||
-    confirmed.text !== d.text ||
-    confirmed.contextHash !== d.contextHash ||
-    draftHash(t) !== d.contextHash
-  )
-    throw new Error('草稿已失效、已提交或内容变化，请重新确认');
-  if (locks.has(t.platform)) throw new Error('平台操作进行中，请稍后确认');
-  if (protectionStatus(t.platform).paused) throw new Error('平台保护暂停');
-  locks.add(t.platform);
-  // Persist before any external action. A network failure must never trigger automatic resend.
-  const attempt = { ...d, beforeMessageIds: t.messages.map((m) => m.nativeId) };
-  put('replyDrafts', { ...attempt, status: 'sending' });
-  try {
-    const data = await inboxTransport.call({
-      platform: t.platform,
-      operation: 'send',
-      accountId: t.accountId,
-      nativeId: t.nativeId,
-      text: d.text,
-      expectedHash: transcriptHash(t.messages),
-    });
-    if (
-      data.platform !== t.platform ||
-      data.accountId !== t.accountId ||
-      data.selected?.nativeId !== t.nativeId ||
-      !data.threads.some((r) => r.nativeId === t.nativeId)
-    )
-      throw new Error('发送回执的账号或会话不符');
-    const selected = data.selected;
-    const receipts = selected.messages.filter(
-      (m) =>
-        m.direction === 'outgoing' &&
-        m.text === d.text &&
-        !t.messages.some((old) => old.nativeId === m.nativeId),
-    );
-    if (receipts.length !== 1) throw new Error('尚未取得唯一平台发送回执');
-    const receipt = receipts[0];
-    mergeNative(data);
-    put('replyDrafts', { ...attempt, status: 'sent', sentMessageId: receipt.nativeId });
-    res.json({ ok: true, messageId: receipt.nativeId });
-  } catch {
-    put('replyDrafts', { ...attempt, status: 'unknown' });
-    res.status(409).json({
-      error: '未能确认发送结果，已锁定本草稿，禁止自动重发。请到官方会话核对，再刷新消息。',
-    });
-  } finally {
-    locks.delete(t.platform);
-  }
+router.post('/inbox/drafts/:id/send', (_req, res) => {
+  res.status(410).json({ error: '平台发送已取消，请复制草稿后自行到官方平台发送。' });
 });
 router.post('/inbox/drafts/:id/reconcile', async (req, res) => {
   const d = get<ReplyDraft>('replyDrafts', String(req.params.id));
@@ -385,26 +333,10 @@ router.post('/inbox/drafts/:id/reconcile', async (req, res) => {
 });
 for (const d of all<ReplyDraft>('replyDrafts').filter((d) => d.status === 'sending'))
   put('replyDrafts', { ...d, status: 'unknown' });
-export async function pollInbox() {
-  for (const t of all<InboxThread>('inboxThreads').filter((t) => t.watching && !t.error)) {
-    if (locks.has(t.platform)) continue;
-    try {
-      const before = transcriptHash(t.messages);
-      await syncInbox(t.platform, t.id);
-      const next = thread(t.id);
-      const freshIncoming = next.messages.some(
-        (m) =>
-          m.direction === 'incoming' &&
-          m.kind === 'text' &&
-          !isSystemGreeting(m) &&
-          !t.messages.some((old) => old.nativeId === m.nativeId),
-      );
-      if (next.autoSuggest && freshIncoming && before !== transcriptHash(next.messages))
-        void generateSuggestion(t.id).catch(() => {});
-    } catch (e) {
-      const latest = thread(t.id);
-      put('inboxThreads', { ...latest, error: (e as Error).message });
-    }
-  }
+// Compatibility for old callers: background platform access is permanently disabled.
+export async function pollInbox() {}
+for (const t of all<InboxThread>('inboxThreads')) {
+  if (t.watching || t.autoSuggest)
+    put('inboxThreads', { ...t, watching: false, autoSuggest: false });
 }
 export default router;
