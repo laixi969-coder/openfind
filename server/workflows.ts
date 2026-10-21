@@ -270,7 +270,7 @@ export async function runWorkflow(
       previous.query?.sort === sort &&
       previous.query?.keyword === query.keyword &&
       previous.query?.limit === query.limit &&
-      (previous.status === 'completed' || previous.checkpoint);
+      (previous.status === 'completed' || previous.checkpoint || previous.dataProvider);
     const j: Job = reusable
       ? previous
       : {

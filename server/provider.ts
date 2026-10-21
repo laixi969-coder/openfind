@@ -64,6 +64,7 @@ export async function providerCall<T>(
   const cookie = getCookie(accountId);
   const response = await fetch(`${base.replace(/\/$/, '')}${path}`, {
     method: 'POST',
+    redirect: 'error',
     headers: {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),

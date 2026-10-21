@@ -246,7 +246,7 @@ export async function runJob(
     const fingerprint =
       job.source === 'live' ? collector?.fingerprint || douyinFingerprint() : undefined;
 
-    if (job.checkpoint && job.dataProvider !== fingerprint)
+    if ((job.checkpoint || job.dataProvider) && job.dataProvider !== fingerprint)
       throw new Error('数据源或账号已改变，不能继续旧分页；请恢复原配置或新建流程');
     job.dataProvider = fingerprint;
     log(
@@ -292,6 +292,8 @@ export async function runJob(
       if (input.sort === 'latest')
         sample.sort((a, b) => (b as Note).publishedAt.localeCompare((a as Note).publishedAt));
     }
+    if (cursor && visitedCursors.has(cursor))
+      throw new Error('数据服务返回循环分页游标，已阻止恢复时重复请求；请新建任务');
     if (job.checkpoint && job.pages >= 200)
       throw new Error('已达到分页保护上限，请新建较小范围的任务');
     for (let page = job.checkpoint ? job.pages : 0; page < 200; page++) {
@@ -375,9 +377,7 @@ export async function runJob(
         job,
         input,
         items,
-        resumable && !repeatedCursor
-          ? { nextCursor: cursor, visitedCursors: [...visitedCursors] }
-          : undefined,
+        resumable ? { nextCursor: cursor, visitedCursors: [...visitedCursors] } : undefined,
       );
       job.elapsed = Math.round((Date.now() - started) / 1000);
       log(

@@ -111,6 +111,11 @@ test('cyclic cursors stop after saving the response instead of repeatedly billin
   assert.deepEqual(cursors, [null, 'A', 'B']);
   assert.equal(j.count, 3);
   assert.ok(get('notes', 'runner-B'));
+  const restored = get<Job>('jobs', j.id)!;
+  await runJob(restored, query);
+  assert.equal(restored.status, 'failed');
+  assert.match(restored.error!, /循环/);
+  assert.deepEqual(cursors, [null, 'A', 'B']);
 });
 
 test('a response arriving after cancellation cannot append results', async () => {
@@ -155,5 +160,15 @@ test('terminal persisted page completes without network or provider revalidation
   await runJob(j, query);
   assert.equal(j.status, 'completed');
   assert.equal(j.dataProvider, 'original-provider');
+  assert.deepEqual(cursors, []);
+});
+
+test('provider changes also block a job interrupted before its first checkpoint', async () => {
+  reset();
+  const j = job('pending-provider');
+  j.dataProvider = 'original-paid-provider';
+  await runJob(j, query);
+  assert.equal(j.status, 'failed');
+  assert.match(j.error!, /数据源或账号已改变/);
   assert.deepEqual(cursors, []);
 });

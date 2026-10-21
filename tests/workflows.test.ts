@@ -598,3 +598,30 @@ test('requalification prefers newer valid evidence over an older higher score wi
   assert.equal(saved.revision, 7);
   assert.deepEqual(w.leadIds, [existing.id]);
 });
+
+test('a pending paid child without a first page retains its provider identity on resume', async () => {
+  const w = createWorkflow({ ...input, keyword: 'pending-paid-child', supplement: false });
+  let childId = '';
+  await runWorkflow(w, async (j) => {
+    childId = j.id;
+    j.dataProvider = 'redfox:original-account';
+    j.status = 'stopped';
+    j.error = '供应商任务等待完成';
+    put('jobs', j);
+  });
+  assert.equal(w.status, 'paused');
+  const restored = get<AcquisitionWorkflow>('workflows', w.id)!;
+  let calls = 0;
+  await runWorkflow(restored, async (j) => {
+    calls++;
+    assert.equal(j.id, childId);
+    assert.equal(j.dataProvider, 'redfox:original-account');
+    assert.equal(j.checkpoint, undefined);
+    j.status = 'failed';
+    j.error = '数据源或账号已改变';
+    put('jobs', j);
+  });
+  assert.equal(calls, 1);
+  assert.equal(restored.status, 'paused');
+  assert.equal(restored.currentJobId, childId);
+});

@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { Note, SearchInput } from '../shared/types.ts';
 import { configGet, configSet, encrypt, decrypt } from './store.ts';
 import { douyinNotes, platformComments, count, parsePlatformJSON } from './platforms/model.ts';
+import { getCookie } from './provider.ts';
 import { apiDate } from './xhs-data.ts';
 
 type Row = Record<string, any>;
@@ -51,7 +52,12 @@ export function douyinFingerprint() {
   const p = douyinProvider();
   const identity =
     p === 'http'
-      ? configGet('providerUrl') + '|' + decrypt(configGet('token')) + '|' + configGet('accountId')
+      ? JSON.stringify([
+          configGet('providerUrl'),
+          decrypt(configGet('token')),
+          configGet('accountId', 'demo-account'),
+          getCookie(),
+        ])
       : douyinUsesApi()
         ? decrypt(configGet('douyin.key.' + p))
         : '';

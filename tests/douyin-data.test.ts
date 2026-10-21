@@ -210,3 +210,14 @@ test('cache separates browser, API supplier and key identity', () => {
   saveDouyinSettings({ provider: 'tikhub', apiKey: 'new-key', maxRequests: 5 });
   assert.equal(cachedJob({ ...job, id: 'next' }, input), undefined);
 });
+
+test('HTTP account identity includes session-only cookie rotation', async () => {
+  const { setSessionCookie } = await import('../server/provider.ts');
+  configSet('douyin.provider', 'http');
+  configSet('accountId', 'cookie-rotation');
+  setSessionCookie('session=first');
+  const first = douyinFingerprint();
+  setSessionCookie('session=second');
+  assert.notEqual(douyinFingerprint(), first);
+  assert.ok(!douyinFingerprint().includes('session='));
+});
