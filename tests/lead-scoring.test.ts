@@ -185,3 +185,103 @@ test('Explicit planned shopping is recognized without treating an old statement 
   ])
     assert.equal(intentScore(text, when(0), '插花', now).recommended, false, text);
 });
+
+test('fresh co-requests can refer to an old explicit product request without inheriting its age', async () => {
+  const { assessComment } = await import('../server/domain.ts');
+  const { demoNotes, demoComments } = await import('../server/demo.ts');
+  const n = demoNotes('家居', 1)[0];
+  const root = {
+    ...demoComments(n.id, 1)[0],
+    id: 'old-request',
+    authorId: 'a',
+    body: '求链接',
+    createdAt: when(100),
+  };
+  const reply = {
+    ...root,
+    id: 'fresh-request',
+    parentId: root.id,
+    authorId: 'b',
+    body: '同求',
+    createdAt: when(0),
+  };
+  const a = assessComment(reply, n, now, [root, reply]);
+  assert.equal(a.recommended, true);
+  assert.equal(a.withinSevenDays, true);
+});
+
+test('later same-person resolution suppresses old demand, but another person and unknown identities do not', async () => {
+  const { assessComment } = await import('../server/domain.ts');
+  const { demoNotes, demoComments } = await import('../server/demo.ts');
+  const n = demoNotes('家居', 1)[0];
+  const root = {
+    ...demoComments(n.id, 1)[0],
+    id: 'demand-root',
+    authorId: 'a',
+    body: '求链接',
+    createdAt: when(2),
+  };
+  const middle = {
+    ...root,
+    id: 'middle',
+    parentId: root.id,
+    authorId: n.authorId,
+    body: '请看说明',
+    createdAt: when(1),
+  };
+  const end = {
+    ...root,
+    id: 'end',
+    parentId: middle.id,
+    body: '已经买了，不需要了',
+    createdAt: when(0),
+  };
+  assert.equal(assessComment(root, n, now, [root, middle, end]).recommended, false);
+  assert.equal(
+    assessComment(root, n, now, [root, middle, { ...end, authorId: 'b' }]).recommended,
+    true,
+  );
+  const anonymous = { ...root, authorId: '' };
+  assert.equal(
+    assessComment(anonymous, n, now, [anonymous, middle, { ...end, authorId: '' }]).recommended,
+    true,
+  );
+});
+
+test('thanks with a renewed service request is not mistaken for resolved consultation', async () => {
+  const { assessComment } = await import('../server/domain.ts');
+  const { demoNotes, demoComments } = await import('../server/demo.ts');
+  const n = { ...demoNotes('家居', 1)[0], title: '软装设计', body: '', tags: [] };
+  const root = {
+    ...demoComments(n.id, 1)[0],
+    id: 'service-root',
+    authorId: 'a',
+    body: '帮我设计一下',
+    createdAt: when(2),
+  };
+  const answer = {
+    ...root,
+    id: 'answer',
+    parentId: root.id,
+    authorId: n.authorId,
+    body: '换成浅色',
+    createdAt: when(1),
+  };
+  const thanks = {
+    ...root,
+    id: 'thanks',
+    parentId: root.id,
+    body: '谢谢，但还想请你帮我设计一下，怎么收费？',
+    createdAt: when(0),
+  };
+  assert.equal(assessComment(root, n, now, [root, answer, thanks]).recommended, true);
+  assert.equal(intentScore('我家有一个了，还想买一个，求链接', when(0), '', now).recommended, true);
+});
+
+test('historic cost questions do not hide an explicit new service request in the same comment', () => {
+  assert.equal(
+    intentScore('硬装10w吗？我也准备装修，想找设计师', when(0), '装修', now).recommended,
+    true,
+  );
+  assert.equal(intentScore('硬装10w吗？', when(0), '装修', now).recommended, false);
+});

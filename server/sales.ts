@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { get, put, all, configGet, configSet } from './store.ts';
 import type { Lead, Note, Comment } from '../shared/types.ts';
 import {
+  stopsContact,
   emptySalesCase,
   emptySalesProfile,
   type SalesCase,
@@ -11,7 +12,12 @@ import {
 } from '../shared/sales.ts';
 const router = Router();
 const identity = (lead: Lead) =>
-  `${lead.source}:${lead.platform || get<Note>('notes', lead.noteId)?.platform || 'xiaohongshu'}:${lead.authorId || lead.id}`;
+  JSON.stringify([
+    lead.source,
+    lead.platform || get<Note>('notes', lead.noteId)?.platform || 'unknown',
+    lead.authorId ? 'author' : 'lead',
+    lead.authorId || lead.id,
+  ]);
 export function readCase(id: string) {
   const record = get<SalesCase>('salesCases', id) || emptySalesCase(id);
   const lead = get<Lead>('leads', id)!;
@@ -64,9 +70,10 @@ router.put('/sales/profile', (req, res) => {
   res.json(p);
 });
 router.get('/sales/export', (_req, res) =>
-  res
-    .attachment('openfind-sales-records.json')
-    .json({ exportedAt: new Date().toISOString(), cases: all<SalesCase>('salesCases') }),
+  res.attachment('openfind-sales-records.json').json({
+    exportedAt: new Date().toISOString(),
+    cases: all<SalesCase>('salesCases').map((c) => (get<Lead>('leads', c.id) ? readCase(c.id) : c)),
+  }),
 );
 router.get('/sales/summary', (_req, res) => {
   const leads = all<Lead>('leads');
@@ -169,6 +176,7 @@ router.put('/leads/:id/sales', (req, res) => {
   const record = {
     ...current,
     ...patch,
+    ...(current.stopped ? { nextFollowUp: '', nextAction: '停止主动联系' } : {}),
     revision: current.revision + 1,
     updatedAt: new Date().toISOString(),
   };
@@ -214,7 +222,7 @@ router.post('/leads/:id/sales/events', (req, res) => {
     events: [...record.events, event],
     revision: record.revision + 1,
     updatedAt: event.createdAt,
-    ...(input.kind === 'optout'
+    ...(input.kind === 'optout' || (input.kind === 'incoming' && stopsContact(input.content))
       ? {
           stopped: true,
           stage: record.stage === 'won' ? ('won' as const) : ('lost' as const),

@@ -130,11 +130,14 @@ export function xhsClient(signal?: AbortSignal, transport: typeof fetch = fetch)
   const key = decrypt(configGet('xhs.key.' + provider));
   const budget = xhsSettings().maxRequests;
   let requests = 0;
-  async function call(path: string, params: Row, query = false): Promise<Row> {
+  function checkRequest() {
     if (!key) throw new Error('请先在设置中填写 ' + provider + ' API Key');
     signal?.throwIfAborted();
     if (requests >= budget)
       throw new Error(`已达到本任务 API 请求上限 ${budget}，已保存现有结果；可在设置调整`);
+  }
+  async function call(path: string, params: Row, query = false): Promise<Row> {
+    checkRequest();
     requests++;
     const url = new URL(
       path,
@@ -218,6 +221,7 @@ export function xhsClient(signal?: AbortSignal, transport: typeof fetch = fetch)
         const id = fingerprint + ':' + native + ':' + limit;
         let task = get<RedTask>('xhs-api-tasks', id);
         if (!task) {
+          checkRequest(); // A local rejection is not an uncertain paid submission.
           // Persist before sending: a lost response must never cause an automatic second paid submission.
           task = { id, state: 'submitting', createdAt: new Date().toISOString() };
           put('xhs-api-tasks', task);

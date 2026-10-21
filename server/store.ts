@@ -51,3 +51,16 @@ export function decrypt(value: string) {
   d.setAuthTag(b.subarray(-16));
   return Buffer.concat([d.update(b.subarray(12, -16)), d.final()]).toString();
 }
+
+// Keep related records and their progress marker in one durable commit.
+export function transaction<T>(work: () => T): T {
+  db.exec('SAVEPOINT openfind_write');
+  try {
+    const result = work();
+    db.exec('RELEASE SAVEPOINT openfind_write');
+    return result;
+  } catch (error) {
+    db.exec('ROLLBACK TO SAVEPOINT openfind_write; RELEASE SAVEPOINT openfind_write');
+    throw error;
+  }
+}

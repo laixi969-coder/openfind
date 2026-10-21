@@ -575,7 +575,13 @@ export function Leads() {
   async function update(id: string, patch: Partial<Lead>) {
     setSaving(true);
     try {
-      await api(`/leads/${encodeURIComponent(id)}`, patch, 'PATCH');
+      const original = focused?.id === id ? focused : data.leads.find((l) => l.id === id);
+      const updated = await api<Lead>(
+        `/leads/${encodeURIComponent(id)}`,
+        { ...patch, revision: original?.revision || 0 },
+        'PATCH',
+      );
+      if (focused?.id === id) setFocused(updated);
       await refresh();
       notify('客户信息已更新');
     } catch (e) {

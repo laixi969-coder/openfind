@@ -48,6 +48,7 @@ export interface Comment {
   source: Mode;
 }
 export interface Lead {
+  revision?: number;
   assessment?: LeadAssessment;
   commentCreatedAt?: string;
   platform?: Platform;
@@ -85,6 +86,7 @@ export interface LeadAssessment {
   exclusions: string[];
 }
 export interface Draft {
+  revision?: number;
   platform?: Platform;
   kind?: 'image' | 'video';
   video?: string;
@@ -108,6 +110,7 @@ export interface Log {
   message: string;
 }
 export interface Job {
+  checkpoint?: { nextCursor: string | null; visitedCursors: string[]; exhausted?: boolean };
   dataProvider?: string;
   searchEvidence?: {
     sort: SearchInput['sort'];
@@ -226,14 +229,69 @@ export interface SemanticReview {
   reviewedAt: string;
   inputHash: string;
 }
+export interface ModelOption {
+  id: string;
+  created?: number;
+  custom?: boolean;
+}
+export interface ModelService {
+  id: string;
+  kind: 'text' | 'image';
+  name: string;
+  baseUrl: string;
+  model: string;
+  models: ModelOption[];
+  modelsSyncedAt?: string;
+  testedAt?: string;
+  hasApiKey: boolean;
+  active: boolean;
+  createdAt: string;
+}
+export interface CopyRewrite {
+  titles: string[];
+  hooks: string[];
+  body: string;
+  tags: string[];
+  avoid: string[];
+  model: string;
+  elapsedMs: number;
+  overlap: number;
+}
+export interface ImageSettings {
+  serviceId?: string;
+  baseUrl: string;
+  model: string;
+  size: '1024x1024' | '1024x1536' | '1536x1024';
+  mode: 'edit' | 'generate';
+  watermark: boolean;
+  hasApiKey: boolean;
+  testedAt?: string;
+  models: ModelOption[];
+  modelsSyncedAt?: string;
+}
+export interface ImageVariant {
+  id: string;
+  url: string;
+  source: string;
+}
+export interface ImageGeneration {
+  id?: string;
+  warning?: string;
+  items: ImageVariant[];
+  mode: 'edit' | 'generate';
+  model: string;
+  size: string;
+  elapsedMs: number;
+}
 export interface LlmSettings {
+  serviceId?: string;
   requestTimeoutSeconds: number;
   reviewTimeoutSeconds: number;
   enabled: boolean;
   baseUrl: string;
   model: string;
   hasApiKey: boolean;
-  models: { id: string; created?: number }[];
+  models: ModelOption[];
   modelsSyncedAt?: string;
   testedAt?: string;
   maxComments: number;

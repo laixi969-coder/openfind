@@ -1,10 +1,12 @@
 import { fetch as modelFetch } from 'undici';
 import { modelDispatcher } from './model-transport.ts';
 import { createHash } from 'node:crypto';
+import { readLimitedBody } from './remote-media.ts';
 import { z } from 'zod';
 import type { Comment, Note, LlmSettings, SemanticReview } from '../shared/types.ts';
-import { configGet, configSet, encrypt, decrypt, get, put } from './store.ts';
+import { configGet, configSet, get, put } from './store.ts';
 import { assessComment, commentThread, intentScore } from './domain.ts';
+import { activeCredentials, updateActive, updateServiceResult } from './services.ts';
 
 const baseUrlSchema = z
   .string()
@@ -26,6 +28,21 @@ const baseUrlSchema = z
       return false;
     }
   }, '服务地址须为 HTTPS，或本机 HTTP；不能包含凭证、查询参数或片段');
+// 默认时限按慢模型留足余量；旧版本写入的 120/900 视为历史默认值，一次性上调。
+function timeoutSeconds(name: string, fallback: number) {
+  const raw = configGet(name);
+  if (!raw) return fallback;
+  const value = Number(raw);
+  if (name === 'llm:requestTimeoutSeconds' && value === 120) {
+    configSet(name, String(fallback));
+    return fallback;
+  }
+  if (name === 'llm:reviewTimeoutSeconds' && value === 900) {
+    configSet(name, String(fallback));
+    return fallback;
+  }
+  return value;
+}
 export const llmSettingsSchema = z
   .object({
     enabled: z.boolean(),
@@ -33,22 +50,24 @@ export const llmSettingsSchema = z
     model: z.string().trim().max(200),
     apiKey: z.string().max(10000).optional(),
     maxComments: z.number().int().min(1).max(200),
-    requestTimeoutSeconds: z.number().int().min(20).max(300).optional(),
-    reviewTimeoutSeconds: z.number().int().min(60).max(3600).optional(),
+    requestTimeoutSeconds: z.number().int().min(20).max(600).optional(),
+    reviewTimeoutSeconds: z.number().int().min(60).max(7200).optional(),
   })
   .strict();
 export function llmSettings(): LlmSettings {
+  const active = activeCredentials('text');
   return {
+    serviceId: active.id,
     enabled: configGet('llm:enabled') === 'true',
-    baseUrl: configGet('llm:baseUrl'),
-    model: configGet('llm:model'),
-    hasApiKey: !!configGet('llm:key'),
+    baseUrl: active.baseUrl,
+    model: active.model,
+    hasApiKey: !!active.key,
     maxComments: Number(configGet('llm:maxComments', '100')),
-    requestTimeoutSeconds: Number(configGet('llm:requestTimeoutSeconds', '120')),
-    reviewTimeoutSeconds: Number(configGet('llm:reviewTimeoutSeconds', '900')),
-    models: JSON.parse(configGet('llm:models', '[]')),
-    modelsSyncedAt: configGet('llm:modelsSyncedAt') || undefined,
-    testedAt: configGet('llm:testedAt') || undefined,
+    requestTimeoutSeconds: timeoutSeconds('llm:requestTimeoutSeconds', 180),
+    reviewTimeoutSeconds: timeoutSeconds('llm:reviewTimeoutSeconds', 3600),
+    models: active.models,
+    modelsSyncedAt: active.modelsSyncedAt,
+    testedAt: active.testedAt,
   };
 }
 export function saveLlmSettings(input: unknown) {
@@ -81,24 +100,22 @@ export function saveLlmSettings(input: unknown) {
   configSet('llm:requestTimeoutSeconds', String(requestTimeoutSeconds));
   configSet('llm:reviewTimeoutSeconds', String(reviewTimeoutSeconds));
   const revision = changed || next.model !== old.model || next.apiKey !== undefined;
-  if (next.apiKey !== undefined) configSet('llm:key', next.apiKey ? encrypt(next.apiKey) : '');
-  for (const k of ['enabled', 'model', 'maxComments'] as const)
-    configSet('llm:' + k, String(next[k]));
-  configSet('llm:baseUrl', base);
-  if (changed || next.apiKey !== undefined) {
-    configSet('llm:models', '[]');
-    configSet('llm:modelsSyncedAt', '');
-  }
-  if (revision) {
-    configSet('llm:testedAt', '');
-    configSet('llm:revision', new Date().toISOString());
-  }
+  configSet('llm:enabled', String(next.enabled));
+  configSet('llm:maxComments', String(next.maxComments));
+  updateActive('text', {
+    baseUrl: base,
+    model: next.model,
+    ...(next.apiKey !== undefined ? { apiKey: next.apiKey } : {}),
+    ...(changed || next.apiKey !== undefined ? { synced: [], syncedAt: '' } : {}),
+    ...(revision ? { testedAt: '' } : {}),
+  });
+  if (revision) configSet('llm:revision', new Date().toISOString());
   return llmSettings();
 }
 async function modelRequest(path: string, body?: unknown, signal?: AbortSignal) {
   const settings = llmSettings();
   if (!settings.baseUrl) throw new Error('请先保存模型服务地址');
-  const key = decrypt(configGet('llm:key'));
+  const key = activeCredentials('text').key;
   let response: Awaited<ReturnType<typeof modelFetch>>;
   try {
     response = await modelFetch(settings.baseUrl + path, {
@@ -125,7 +142,7 @@ async function modelRequest(path: string, body?: unknown, signal?: AbortSignal) 
   if (!response.ok)
     throw new Error(`模型服务返回 HTTP ${response.status}，请检查 Key、模型权限及服务地址`);
   // Never include upstream response bodies in errors: providers can echo credentials or prompts.
-  const text = await response.text();
+  const text = (await readLimitedBody(response, 2_000_000)).toString('utf8');
   if (text.length > 500000) throw new Error('模型响应过大，已拒绝处理');
   try {
     return JSON.parse(text) as unknown;
@@ -134,6 +151,7 @@ async function modelRequest(path: string, body?: unknown, signal?: AbortSignal) 
   }
 }
 export async function syncModels() {
+  const credentials = activeCredentials('text');
   const schema = z.object({
     data: z
       .array(z.object({ id: z.string().min(1).max(200), created: z.number().optional() }))
@@ -149,11 +167,10 @@ export async function syncModels() {
   const unique = [...new Map(data.data.map((m) => [m.id, m])).values()].sort(
     (a, b) => (b.created || 0) - (a.created || 0) || a.id.localeCompare(b.id),
   );
-  configSet('llm:models', JSON.stringify(unique));
-  configSet('llm:modelsSyncedAt', new Date().toISOString());
+  updateServiceResult(credentials, { synced: unique, syncedAt: new Date().toISOString() });
   return llmSettings();
 }
-async function completion(
+export async function completion(
   messages: { role: 'system' | 'user'; content: string }[],
   signal?: AbortSignal,
 ) {
@@ -177,6 +194,7 @@ async function completion(
   }
 }
 export async function testLlm() {
+  const credentials = activeCredentials('text');
   const start = Date.now();
   const result = await completion([
     { role: 'system', content: 'Connection test. Return only JSON {"ok":true}.' },
@@ -187,12 +205,13 @@ export async function testLlm() {
   ]);
   if (!z.object({ ok: z.literal(true) }).safeParse(result).success)
     throw new Error('服务已响应，但未通过所选模型的 JSON 输出测试');
-  configSet('llm:testedAt', new Date().toISOString());
+  const testedAt = new Date().toISOString();
+  updateServiceResult(credentials, { testedAt });
   return {
     ok: true,
-    model: llmSettings().model,
+    model: credentials.model,
     latencyMs: Date.now() - start,
-    testedAt: configGet('llm:testedAt'),
+    testedAt,
   };
 }
 const redact = (text: string) =>

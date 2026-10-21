@@ -174,3 +174,23 @@ test('TikHub comments keep attached replies and reject repeating cursors', async
   assert.equal(r.items[1].parentId, 'xhs:c');
   await assert.rejects(c.comments(note, 20, r.nextCursor), /游标无效/);
 });
+
+test('local cancellation or exhausted budget cannot create a false uncertain paid submission', async () => {
+  saveXhsSettings({ provider: 'redfox', apiKey: 'preflight-test', maxRequests: 1 });
+  const n = { ...note, id: 'xhs:never-submitted', nativeId: 'never-submitted' };
+  let requests = 0;
+  const transport = mock(() => {
+    requests++;
+    return { code: 2000, data: { list: [], hasMore: false } };
+  });
+  const cancelled = new AbortController();
+  cancelled.abort();
+  await assert.rejects(xhsClient(cancelled.signal, transport).comments(n, 20, null));
+  assert.equal(requests, 0);
+  assert.ok(!all<any>('xhs-api-tasks').some((t) => t.id.includes('never-submitted')));
+  const client = xhsClient(undefined, transport);
+  await client.search(input, null);
+  await assert.rejects(client.comments(n, 20, null), /请求上限/);
+  assert.equal(requests, 1);
+  assert.ok(!all<any>('xhs-api-tasks').some((t) => t.id.includes('never-submitted')));
+});

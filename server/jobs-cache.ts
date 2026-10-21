@@ -1,6 +1,6 @@
 import { douyinFingerprint } from './douyin-data.ts';
 import { xhsFingerprint } from './xhs-data.ts';
-import type { Job, SearchInput } from '../shared/types.ts';
+import type { Job, SearchInput, Note, Comment } from '../shared/types.ts';
 import { all, get, configGet } from './store.ts';
 
 // Both the orchestrator and the executor must agree on cache eligibility. Local
@@ -34,8 +34,16 @@ export function cachedJob(job: Job, input: SearchInput): Job | undefined {
               ? 'popularity_descending'
               : 'general')
       ) &&
-      j.count >= input.limit &&
+      j.count === new Set(j.resultIds).size &&
+      (j.count >= input.limit || j.checkpoint?.exhausted === true) &&
       Date.now() - Date.parse(j.dataFetchedAt || j.finishedAt || '') < 300000 &&
-      j.resultIds.every((id) => get(job.type === 'search' ? 'notes' : 'comments', id)),
+      j.resultIds.every((id) => {
+        const item = get<Note | Comment>(job.type === 'search' ? 'notes' : 'comments', id);
+        return (
+          item?.source === job.source &&
+          (!item.platform || item.platform === job.platform) &&
+          (job.type !== 'comments' || (item as Comment).noteId === job.noteId)
+        );
+      }),
   );
 }

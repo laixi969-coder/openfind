@@ -129,3 +129,6 @@ export function communicationPlan(lead: Lead, profile: SalesProfile, record: Sal
       : '为避免推荐不合适的方案，你方便说一下可接受的预算范围吗？',
   };
 }
+
+export const stopsContact = (text: string) =>
+  /别再联系|不要再联系|别发了|不要发了|不需要.{0,5}联系/.test(text);

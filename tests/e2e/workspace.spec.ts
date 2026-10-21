@@ -220,8 +220,17 @@ test('model settings sync available IDs, test generation and display optional se
     await expect(
       page.getByText('已同步服务当前账号可用的 2 个模型', { exact: false }),
     ).toBeVisible();
-    await page.getByText(/模型列表（2）/).click();
-    await page.getByRole('button', { name: 'fixture-chat-new', exact: true }).click();
+    await page.getByLabel('复核模型 ID').selectOption('fixture-chat-new');
+    const llmPanel = page.getByLabel('大模型设置');
+    await page.getByLabel('新增文字模型').fill('fixture-chat-custom');
+    await llmPanel.getByRole('button', { name: '添加模型', exact: true }).click();
+    await expect(page.getByLabel('复核模型 ID')).toContainText('fixture-chat-custom');
+    await page.getByLabel('复核模型 ID').selectOption('fixture-chat-custom');
+    await llmPanel.getByRole('button', { name: '删除当前自定义模型', exact: true }).click();
+    await expect(
+      page.getByLabel('复核模型 ID').locator('option[value="fixture-chat-custom"]'),
+    ).toHaveCount(0);
+    await page.getByLabel('复核模型 ID').selectOption('fixture-chat-new');
     await page.getByRole('button', { name: '测试模型连接', exact: true }).click();
     await expect(
       page.getByText('所选模型 fixture-chat-new 的真实生成与 JSON 输出测试通过', { exact: false }),

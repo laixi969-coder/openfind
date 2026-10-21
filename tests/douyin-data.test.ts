@@ -188,7 +188,8 @@ test('errors never trigger browser fallback or chargeable retries', async () => 
 });
 test('cache separates browser, API supplier and key identity', () => {
   saveDouyinSettings({ provider: 'tikhub', maxRequests: 5 });
-  put('notes', note);
+  put('notes', { ...note, source: 'live', platform: 'douyin' });
+  put('notes', { ...note, id: note.id + '-second', source: 'live', platform: 'douyin' });
   const job: any = {
     id: 'cached',
     type: 'search',
@@ -198,7 +199,7 @@ test('cache separates browser, API supplier and key identity', () => {
     status: 'completed',
     query: input,
     count: 2,
-    resultIds: [note.id],
+    resultIds: [note.id, note.id + '-second'],
     finishedAt: new Date().toISOString(),
     dataProvider: douyinFingerprint(),
   };

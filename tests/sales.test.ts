@@ -150,3 +150,20 @@ test('Explicit refusal persists, clears follow-up and prevents further outbound 
     400,
   );
 });
+
+test('incoming refusal stops contact and stopped records cannot retain scheduled follow-up', async () => {
+  put('leads', { ...lead, id: 'incoming-refusal', authorId: 'incoming-refusal-person' });
+  path = '/leads/incoming-refusal/sales';
+  assert.equal((await add('incoming', '不要再联系我')).status, 200);
+  let c = await (await req(path)).json();
+  assert.equal(c.stopped, true);
+  assert.equal(
+    (await save({ nextFollowUp: '2026-12-01T00:00:00Z', nextAction: '再联系' })).status,
+    200,
+  );
+  c = await (await req(path)).json();
+  assert.equal(c.nextFollowUp, '');
+  assert.equal(c.nextAction, '停止主动联系');
+  const exported = await (await req('/sales/export')).json();
+  assert.equal(exported.cases.find((x: any) => x.id === 'incoming-refusal').nextFollowUp, '');
+});

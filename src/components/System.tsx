@@ -1,6 +1,7 @@
 import { DouyinDataSettings } from './DouyinDataSettings';
 import { XhsDataSettings } from './XhsDataSettings';
 import { LlmSettingsPanel } from './LlmSettings';
+import { ImageSettingsPanel } from './ImageSettings';
 import { useState } from 'react';
 import {
   Settings,
@@ -108,6 +109,7 @@ export function SettingsPage() {
       <DouyinDataSettings />
       <PlatformConnections />
       <LlmSettingsPanel />
+      <ImageSettingsPanel />
       <div className="settings-layout">
         <section className="panel settings-form">
           <div className="section-title">

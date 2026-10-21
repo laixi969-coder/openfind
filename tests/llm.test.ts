@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 const dir = mkdtempSync(join(tmpdir(), 'openfind-llm-'));
 process.env.OPENFIND_DATA_DIR = dir;
-const { db, configGet, get, all } = await import('../server/store.ts');
+const { db, configGet, configSet, get, all } = await import('../server/store.ts');
 const {
   saveLlmSettings,
   llmSettings,
@@ -272,18 +272,25 @@ test('A creator purchase cannot establish that the reader has bought; raw model 
   mode = 'ok';
 });
 
-test('Timeout defaults are 120/900 seconds, configurable, validated and preserved for old clients', () => {
+test('Timeout defaults are 180/3600 seconds, legacy 120/900 is upgraded once, and input is validated', () => {
   const p = { enabled: false, baseUrl: base, model: 'chat-old', maxComments: 100 };
-  assert.equal(llmSettings().requestTimeoutSeconds, 120);
-  assert.equal(llmSettings().reviewTimeoutSeconds, 900);
-  saveLlmSettings({ ...p, requestTimeoutSeconds: 180, reviewTimeoutSeconds: 1200 });
-  saveLlmSettings(p);
   assert.equal(llmSettings().requestTimeoutSeconds, 180);
-  assert.equal(llmSettings().reviewTimeoutSeconds, 1200);
-  assert.throws(() => saveLlmSettings({ ...p, requestTimeoutSeconds: 301 }));
+  assert.equal(llmSettings().reviewTimeoutSeconds, 3600);
+  // 旧版本写入的默认值一次性上调，自定义值不动
+  configSet('llm:requestTimeoutSeconds', '120');
+  configSet('llm:reviewTimeoutSeconds', '900');
+  assert.equal(llmSettings().requestTimeoutSeconds, 180);
+  assert.equal(llmSettings().reviewTimeoutSeconds, 3600);
+  saveLlmSettings({ ...p, requestTimeoutSeconds: 240, reviewTimeoutSeconds: 1800 });
+  saveLlmSettings(p);
+  assert.equal(llmSettings().requestTimeoutSeconds, 240);
+  assert.equal(llmSettings().reviewTimeoutSeconds, 1800);
+  assert.throws(() => saveLlmSettings({ ...p, requestTimeoutSeconds: 601 }));
   assert.throws(() =>
-    saveLlmSettings({ ...p, requestTimeoutSeconds: 120, reviewTimeoutSeconds: 60 }),
+    saveLlmSettings({ ...p, requestTimeoutSeconds: 600, reviewTimeoutSeconds: 60 }),
   );
+  // 收尾：恢复默认，供下一个用例断言真实请求的截止时间
+  saveLlmSettings({ ...p, requestTimeoutSeconds: 180, reviewTimeoutSeconds: 3600 });
   assert.equal(llmSettings().requestTimeoutSeconds, 180);
 });
 

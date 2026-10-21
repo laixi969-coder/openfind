@@ -50,7 +50,7 @@ export function parseIntent(text: string) {
     explanation: `搜索「${keyword}」的${limit === 0 ? '全部' : limit + '篇'}${/视频/.test(text) ? '视频' : '作品'}，按${/热门|爆款|高互动|最火/.test(text) ? '热度' : /最新|最近/.test(text) ? '发布时间' : '相关性'}排序`,
   };
 }
-export const qualificationVersion = 'intent-rules-3.1.1';
+export const qualificationVersion = 'intent-rules-3.2.0';
 export function intentScore(
   body: string,
   createdAt = '',
@@ -91,7 +91,9 @@ export function intentScore(
     /(?:已经|刚刚|刚|早就|已)(?:买到|买了|买好|购买|下单|预约|解决|找到|选好)|我买了|买好了|解决了|不用了|不需要了|不买了|不想买|不打算买|不要链接|不用给.{0,2}链接|不问价|已成交|我买的.{0,30}(?:残留|怎么|问题|坏)/.exec(
       text.replace(/(?:还没|没|未)买/g, '尚未购'),
     );
-  const seller = /加我|私我|看我主页|看主页|厂家直销|我这有|我家有|专业代办/.exec(text);
+  const seller = /加我|私我|看我主页|看主页|厂家直销|我这有|我家有(?:卖|货|现货)|专业代办/.exec(
+    text,
+  );
   const path =
     /链接.{0,6}(?:给|发|分享)|(?:有|给|发).{0,4}链接(?:吗|么|嘛|[?？])|(?:求|蹲)个?链接|(?:在)?哪(?:里|儿)?买(?:的|到)?|怎么预约|如何预约|怎么买|想订|想下单|求联系方式|怎么联系|^.{0,16}链接[?？!！。]?$/.exec(
       text,
@@ -104,7 +106,7 @@ export function intentScore(
   const service =
     serviceContext &&
     /(?:能|可以)?.{0,3}帮我设计|给我设计|求改|求设计|求改造|想找.{0,5}设计|找设计师/.exec(text);
-  const costComparison =
+  const costQuestion =
     /(?:硬装|软装|装修|装的|花了).{0,16}\d+(?:\.\d+)?\s*(?:w|万|元|块).{0,8}(?:吗|么|[?？])/i.exec(
       text,
     );
@@ -116,6 +118,15 @@ export function intentScore(
     !/(?:不|没)(?:想|会|打算|准备|计划|要去)|假如|如果|要是|听说|他说|她说|朋友说/.test(text) &&
     /(?:要去|准备去|打算去|计划去)[^。！？?\n]{0,24}买(?:花|灯|地毯|沙发|花瓶|家具|一|个|这|同款)/.exec(
       text,
+    );
+  const costComparison =
+    costQuestion &&
+    !(
+      path ||
+      sharing ||
+      service ||
+      plannedPurchase ||
+      /准备装修|我.{0,8}(?:想装修|想买|准备买)/.test(text)
     );
   const demand =
     plannedPurchase ||
@@ -233,15 +244,38 @@ export function commentThread(c: Comment, comments: Comment[]) {
     seen.add(parent.id);
     root = parent;
   }
-  return { root, replies: scoped.filter((x) => x.parentId === root.id && x.id !== c.id) };
+  const byId = new Map(scoped.map((x) => [x.id, x]));
+  const replies = scoped.filter((x) => {
+    if (x.id === c.id || x.id === root.id) return false;
+    let parentId = x.parentId;
+    const visited = new Set<string>();
+    for (let i = 0; i < 8 && parentId && !visited.has(parentId); i++) {
+      if (parentId === root.id) return true;
+      visited.add(parentId);
+      parentId = byId.get(parentId)?.parentId || null;
+    }
+    return false;
+  });
+  return { root, replies };
 }
 export function toLead(c: Comment, note?: Note, comments: Comment[] = []): Lead {
   const assessment = assessComment(c, note, Date.now(), comments);
   return {
-    id: `${c.source}:${c.authorId || c.id}:${c.noteId}`,
+    id:
+      'lead:' +
+      encodeURIComponent(
+        JSON.stringify([
+          c.source,
+          c.platform || note?.platform || 'unknown',
+          c.noteId,
+          c.authorId ? 'author' : 'comment',
+          c.authorId || c.id,
+        ]),
+      ),
+    revision: 0,
     commentId: c.id,
     noteId: c.noteId,
-    platform: c.platform,
+    platform: c.platform || note?.platform,
     name: c.author,
     authorId: c.authorId,
     region: c.region,
@@ -260,7 +294,10 @@ export function toLead(c: Comment, note?: Note, comments: Comment[] = []): Lead 
 export function assessComment(c: Comment, note?: Note, now = Date.now(), comments: Comment[] = []) {
   const { root, replies } = commentThread(c, comments);
   const authorReplies = replies.filter(
-    (x) => x.authorId === note?.authorId && Date.parse(x.createdAt) >= Date.parse(c.createdAt),
+    (x) =>
+      !!note?.authorId &&
+      x.authorId === note.authorId &&
+      Date.parse(x.createdAt) >= Date.parse(c.createdAt),
   );
   const result = intentScore(
     c.body,
@@ -297,7 +334,7 @@ export function assessComment(c: Comment, note?: Note, now = Date.now(), comment
     /我也想要|我也要|同求|蹲一个|求同款/.test(c.body)
   ) {
     const parent = intentScore(root.body, root.createdAt, note?.title || '', now);
-    if (parent.intentType === 'purchase' && parent.recommended) {
+    if (parent.intentType === 'purchase' && !parent.exclusions.length) {
       result.intentType = 'purchase';
       result.stage = 'demand';
       result.verdict = '跟随主评论询问同款';
@@ -310,29 +347,54 @@ export function assessComment(c: Comment, note?: Note, now = Date.now(), comment
       result.reason = `回复「${c.body}」承接主评论「${root.body}」，支持同款购买兴趣，未证实下单`;
     }
   }
-  if (
-    result.intentType === 'service' &&
-    authorReplies.length &&
-    replies.some(
-      (x) =>
-        x.authorId === c.authorId &&
-        Date.parse(x.createdAt) > Date.parse(c.createdAt) &&
-        /好的|谢谢|明白|收到/.test(x.body),
-    )
-  ) {
-    result.threadEvidence?.push(
-      ...replies
+  const subsequent = c.authorId
+    ? replies
         .filter(
-          (x) =>
-            x.authorId === c.authorId &&
-            Date.parse(x.createdAt) > Date.parse(c.createdAt) &&
-            /好的|谢谢|明白|收到/.test(x.body),
+          (x) => x.authorId === c.authorId && Date.parse(x.createdAt) > Date.parse(c.createdAt),
         )
-        .map((x) => ({ commentId: x.id, role: '原评论者后续回应', text: x.body })),
+        .sort(
+          (a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt) || b.id.localeCompare(a.id),
+        )
+    : [];
+  const latestDecision = subsequent.find((x) => {
+    const a = intentScore(x.body, x.createdAt, note?.title || '', now);
+    return a.stage === 'resolved' || a.stage === 'demand';
+  });
+  if (
+    result.stage !== 'restricted' &&
+    latestDecision &&
+    intentScore(latestDecision.body, latestDecision.createdAt, '', now).stage === 'resolved'
+  ) {
+    const reason = '同一评论者后续明确表示已购买或不再需要';
+    result.stage = 'resolved';
+    result.intentType = 'resolved';
+    result.verdict = reason;
+    result.score = 0;
+    result.recommended = false;
+    result.reason = reason;
+    result.exclusions.push(reason);
+    result.threadEvidence?.push({
+      commentId: latestDecision.id,
+      role: '本人后续结束需求',
+      text: latestDecision.body,
+    });
+  }
+  const thanks = subsequent.filter(
+    (x) =>
+      /好的|谢谢|明白|收到/.test(x.body) &&
+      !/[?？]|还想|还需要|继续|但是|不过|但/.test(x.body) &&
+      ['discussion', 'considering'].includes(
+        intentScore(x.body, x.createdAt, note?.title || '', now).stage,
+      ) &&
+      authorReplies.some((a) => Date.parse(a.createdAt) <= Date.parse(x.createdAt)),
+  );
+  if (result.intentType === 'service' && thanks.length && !latestDecision) {
+    result.threadEvidence?.push(
+      ...thanks.map((x) => ({ commentId: x.id, role: '原评论者后续回应', text: x.body })),
     );
     result.recommended = false;
     result.score = Math.min(result.score, 49);
-    result.reason = '已收到作者的具体改造建议并致谢，暂无继续委托或付费请求';
+    result.reason = '已收到作者回复并致谢，暂无继续委托或付费请求';
     result.limitations?.push('只能确认曾咨询，不能认定仍需服务');
   }
   if (!result.exclusions.length && c.semantic) result.semantic = c.semantic;

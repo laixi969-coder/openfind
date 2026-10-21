@@ -24,6 +24,8 @@ import type { Note, Draft, Platform } from '../../shared/types';
 import { api, safeUrl } from '../api';
 import { useWorkspace } from '../context';
 import { AccountForm } from './Accounts';
+import { AiImage } from './AiImage';
+import { CopyRewrite } from './CopyRewrite';
 import { Modal, PageHeading, Empty, Busy, ExternalLink as SourceLink, SourceTag } from './ui';
 export function Studio() {
   const { data, navigate, editDraft, notify, refresh, newDraft } = useWorkspace();
@@ -175,7 +177,7 @@ export function Editor({
   const [video, setVideo] = useState(initial?.video || '');
   const videoFile = useRef<HTMLInputElement>(null);
   const [title, setTitle] = useState(initial?.title || note?.title.slice(0, 20) || ''),
-    [body, setBody] = useState(initial?.body || note?.body || ''),
+    [body, setBody] = useState(initial?.body ?? note?.body ?? ''),
     [tags, setTags] = useState((initial?.tags || note?.tags || []).join(' ')),
     [images, setImages] = useState<string[]>(initial?.images || note?.images || []),
     [visibility, setVisibility] = useState<Draft['visibility']>(initial?.visibility || 'public'),
@@ -201,12 +203,16 @@ export function Editor({
     title.length <= 20 &&
     body.length <= 1000 &&
     (kind === 'video' ? !!video : images.length >= 1 && images.length <= 18);
+  const editRevision = useRef(0);
   const changed = () => {
+    editRevision.current++;
     setDirty(true);
   };
   async function persist() {
+    const savingRevision = editRevision.current;
     const d = await api<Draft>('/drafts', {
       id: saved?.id,
+      revision: saved?.revision || 0,
       noteId: source?.id || initial?.noteId || '',
       title,
       body,
@@ -220,7 +226,8 @@ export function Editor({
       origin: source ? 'clone' : 'original',
     });
     setSaved(d);
-    setDirty(false);
+    if (editRevision.current === savingRevision) setImages(d.images);
+    setDirty(editRevision.current !== savingRevision);
     await refresh();
     return d;
   }
@@ -464,6 +471,17 @@ export function Editor({
               {preview ? '收起预览' : '预览作品'}
             </button>
           </div>
+          <CopyRewrite
+            note={source}
+            current={{ title, body, tags }}
+            notify={notify}
+            onApply={(patch) => {
+              if (patch.title !== undefined) setTitle(patch.title);
+              if (patch.body !== undefined) setBody(patch.body);
+              if (patch.tags !== undefined) setTags(patch.tags);
+              changed();
+            }}
+          />
           <label className="field-label" htmlFor="draft-title">
             标题<span>{title.length} / 20</span>
           </label>
@@ -555,6 +573,20 @@ export function Editor({
           </div>
         </section>
       </div>
+      {kind === 'image' && (
+        <div className="editor-ai">
+          <AiImage
+            images={images}
+            notify={notify}
+            onUse={(urls, mode) => {
+              if (mode === 'append' && images.length + urls.length > 18)
+                notify('素材最多 18 张，超出部分未加入', true);
+              setImages((v) => (mode === 'replace' ? urls : [...v, ...urls]));
+              changed();
+            }}
+          />
+        </div>
+      )}
       <footer className="editor-footer">
         <span className="muted">
           {dirty ? '有未保存的修改' : saved ? '已保存到本机' : '完成后保存为草稿'}
@@ -564,7 +596,7 @@ export function Editor({
             <ArrowLeft size={14} />
             返回作品列表
           </button>
-          {saved && (
+          {saved && !dirty && !busy && (
             <a className="icon-btn" title="下载图文包" href={`/api/drafts/${saved.id}/bundle`}>
               <Download size={16} />
             </a>

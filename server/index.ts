@@ -1,3 +1,6 @@
+import { backupDraftImages } from './draft-media.ts';
+import { downloadMedia } from './remote-media.ts';
+import { saveCollectedLead } from './leads.ts';
 import {
   douyinClient,
   douyinProvider,
@@ -12,13 +15,35 @@ import { acquisitionLimits } from '../shared/collection-limits.ts';
 import inboxRouter from './inbox.ts';
 import salesRouter from './sales.ts';
 import { llmSettings, saveLlmSettings, syncModels, testLlm, semanticFor } from './llm.ts';
+import {
+  imageMime,
+  generationHistory,
+  imageSettings,
+  saveImageSettings,
+  checkImageService,
+  generateVariants,
+  reuseLlmService,
+  syncImageModels,
+  testImageGeneration,
+  variantsSchema,
+} from './images.ts';
+import { rewriteCopy, rewriteInputSchema } from './copy.ts';
+import {
+  addServiceModel,
+  removeServiceModel,
+  listServices,
+  createService,
+  activateService,
+  deleteService,
+} from './services.ts';
 import express from 'express';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import multer from 'multer';
 import { dataDir } from './store.ts';
+import { commitJobPage } from './job-progress.ts';
 import { cachedJob } from './jobs-cache.ts';
 import { setTimeout as delay } from 'node:timers/promises';
 import JSZip from 'jszip';
@@ -188,33 +213,48 @@ function currentLead(lead: Lead, comments = all<Comment>('comments')): Lead {
     commentCreatedAt: c?.createdAt || lead.commentCreatedAt || '',
   };
 }
-async function runJob(job: Job, input: z.infer<typeof searchSchema>, parentSignal?: AbortSignal) {
+export async function runJob(
+  job: Job,
+  input: z.infer<typeof searchSchema>,
+  parentSignal?: AbortSignal,
+) {
   const abort = new AbortController();
   const cancel = () => abort.abort();
   parentSignal?.addEventListener('abort', cancel, { once: true });
   if (parentSignal?.aborted) abort.abort();
   running.set(job.id, abort);
   const started = Date.now();
-  const collector =
-    job.source !== 'live'
-      ? null
-      : input.platform === 'xiaohongshu'
-        ? xhsClient(abort.signal)
-        : douyinUsesApi()
-          ? douyinClient(abort.signal)
-          : null;
-  if (job.source === 'live') job.dataProvider = collector?.fingerprint || douyinFingerprint();
-  let cursor: string | null = null;
+  let collector: ReturnType<typeof xhsClient> | ReturnType<typeof douyinClient> | null = null;
+  let cursor: string | null = job.checkpoint?.nextCursor || null;
   let readId: string | null = null;
-  const seen = new Set<string>();
+  const visitedCursors = new Set(job.checkpoint?.visitedCursors || []);
   try {
     abort.signal.throwIfAborted();
+    if (job.checkpoint && (!cursor || (input.limit > 0 && job.count >= input.limit))) {
+      job.status = 'completed';
+      return;
+    }
+
+    collector =
+      job.source !== 'live'
+        ? null
+        : input.platform === 'xiaohongshu'
+          ? xhsClient(abort.signal)
+          : douyinUsesApi()
+            ? douyinClient(abort.signal)
+            : null;
+    const fingerprint =
+      job.source === 'live' ? collector?.fingerprint || douyinFingerprint() : undefined;
+
+    if (job.checkpoint && job.dataProvider !== fingerprint)
+      throw new Error('数据源或账号已改变，不能继续旧分页；请恢复原配置或新建流程');
+    job.dataProvider = fingerprint;
     log(
       job,
       'INFO',
       `${job.source === 'demo' ? '演示任务' : '真实任务'}开始：${job.type === 'search' ? input.keyword : job.noteId}`,
     );
-    if (job.source === 'live' && !input.forceRefresh) {
+    if (job.source === 'live' && !job.checkpoint && !input.forceRefresh) {
       const cached = cachedJob(job, input);
       if (cached) {
         job.resultIds = cached.resultIds.slice(0, input.limit);
@@ -252,7 +292,10 @@ async function runJob(job: Job, input: z.infer<typeof searchSchema>, parentSigna
       if (input.sort === 'latest')
         sample.sort((a, b) => (b as Note).publishedAt.localeCompare((a as Note).publishedAt));
     }
-    for (let page = 0; page < 200; page++) {
+    if (job.checkpoint && job.pages >= 200)
+      throw new Error('已达到分页保护上限，请新建较小范围的任务');
+    for (let page = job.checkpoint ? job.pages : 0; page < 200; page++) {
+      let repeatedCursor = false;
       abort.signal.throwIfAborted();
       let items: (Note | Comment)[] = [];
       if (job.source === 'demo') {
@@ -322,26 +365,20 @@ async function runJob(job: Job, input: z.infer<typeof searchSchema>, parentSigna
         if (!collector) recordPlatformSuccess(input.platform);
         items = result.items.map((x) => ({ ...x, source: 'live' })) as (Note | Comment)[];
         const next: string | null = result.nextCursor;
-        if (next && next === cursor)
-          throw new Error('数据服务返回重复分页游标，任务已停止以防无限请求');
+        if (cursor) visitedCursors.add(cursor);
+        repeatedCursor = !!next && visitedCursors.has(next);
         cursor = next;
       }
       abort.signal.throwIfAborted();
-      for (const item of items) {
-        if (seen.has(item.id)) continue;
-        if (input.limit && job.count >= input.limit) break;
-        seen.add(item.id);
-        put(job.type === 'search' ? 'notes' : 'comments', item);
-        job.resultIds.push(item.id);
-        job.count++;
-      }
-      job.pages++;
-      if (job.type === 'search' && input.sort === 'latest')
-        job.resultIds.sort((a, b) =>
-          (get<Note>('notes', b)?.publishedAt || '').localeCompare(
-            get<Note>('notes', a)?.publishedAt || '',
-          ),
-        );
+      const resumable = job.source === 'demo' || !!collector || douyinProvider() === 'http';
+      commitJobPage(
+        job,
+        input,
+        items,
+        resumable && !repeatedCursor
+          ? { nextCursor: cursor, visitedCursors: [...visitedCursors] }
+          : undefined,
+      );
       job.elapsed = Math.round((Date.now() - started) / 1000);
       log(
         job,
@@ -349,6 +386,7 @@ async function runJob(job: Job, input: z.infer<typeof searchSchema>, parentSigna
         `${job.type === 'search' ? '作品' : '评论'}第 ${job.pages} 页完成，累计 ${job.count} 条（已去重）`,
       );
       if (!cursor || (input.limit > 0 && job.count >= input.limit)) break;
+      if (repeatedCursor) throw new Error('数据服务返回循环分页游标，已保存本页并停止以防重复请求');
       if (page === 199)
         throw new Error('达到本地分页保护上限 200 页，已保存当前结果；请缩小范围后重试');
     }
@@ -376,7 +414,10 @@ async function runJob(job: Job, input: z.infer<typeof searchSchema>, parentSigna
         'INFO',
         `数据源 ${collector.provider}，本次 API 请求 ${collector.requests} 次；计费以供应商账单为准`,
       );
-    if (readId) await browserCall('/close-read', { cursor: readId }).catch(() => {});
+    if (readId)
+      await browserCall('/close-read', { cursor: readId }, AbortSignal.timeout(3000)).catch(
+        () => {},
+      );
     job.elapsed = Math.round((Date.now() - started) / 1000);
     if (job.status === 'completed') {
       job.finishedAt = new Date().toISOString();
@@ -666,10 +707,8 @@ app.post('/api/leads/collect', (req, res) => {
         restricted++;
         continue;
       }
-      if (!get('leads', lead.id)) {
-        put('leads', lead);
+      if (saveCollectedLead(c, get<Note>('notes', c.noteId), all<Comment>('comments')).added)
         added++;
-      }
     }
   }
   res.json({ added, restricted });
@@ -684,13 +723,20 @@ app.patch('/api/leads/:id', (req, res) => {
   }
   const patch = z
     .object({
+      revision: z.number().int().min(0),
       status: z.enum(['new', 'contacted', 'qualified', 'archived']).optional(),
       memo: z.string().max(3000).optional(),
       outreach: z.string().max(3000).optional(),
     })
+    .strict()
     .parse(req.body);
-  put('leads', { ...lead, ...patch });
-  res.json({ ...lead, ...patch });
+  if (patch.revision !== (lead.revision || 0)) {
+    res.status(409).json({ error: '客户记录已被修改，请重新打开核对；本次修改未覆盖已有记录' });
+    return;
+  }
+  const updated = { ...lead, ...patch, revision: (lead.revision || 0) + 1 };
+  put('leads', updated);
+  res.json(updated);
 });
 const image = z
   .string()
@@ -698,6 +744,7 @@ const image = z
   .refine(
     (s) =>
       /^\/assets\/[\w.-]+$/.test(s) ||
+      /^\/api\/media\/[a-f0-9-]+\.(png|jpe?g|webp)$/.test(s) ||
       /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(s) ||
       /^https?:\/\//.test(s),
     '不支持的图片格式',
@@ -715,10 +762,18 @@ const draftSchema = z.object({
   visibility: z.enum(['public', 'private']),
   accountId: z.string().min(1),
 });
-app.post('/api/drafts', (req, res) => {
+app.post('/api/drafts', async (req, res) => {
   const input = draftSchema.parse(req.body);
   let id = req.body.id ? z.string().parse(req.body.id) : randomUUID();
   const previous = get<Draft>('drafts', id);
+  if (req.body.id && !previous) {
+    res.status(404).json({ error: '草稿已删除，不能用旧窗口重新覆盖；请新建草稿' });
+    return;
+  }
+  if (previous && req.body.revision !== (previous.revision || 0)) {
+    res.status(409).json({ error: '草稿已更新，请保留当前编辑内容，重新打开核对后再保存' });
+    return;
+  }
   if (previous && previous.status !== 'draft') id = randomUUID();
   if (input.origin !== 'original' && !get<Note>('notes', input.noteId)) {
     res.status(404).json({ error: '来源作品不存在，请重新选择作品' });
@@ -735,12 +790,33 @@ app.post('/api/drafts', (req, res) => {
     res.status(400).json({ error: '请上传本地视频' });
     return;
   }
+  for (const url of [...input.images, ...(input.video ? [input.video] : [])]) {
+    const path = url.startsWith('/api/media/')
+      ? join(dataDir, 'uploads', url.split('/').at(-1)!)
+      : /^\/assets\/[\w.-]+$/.test(url)
+        ? resolve('public' + url)
+        : null;
+    if (path && (!existsSync(path) || !statSync(path).isFile())) {
+      res.status(400).json({ error: '素材文件不存在，请重新上传后保存' });
+      return;
+    }
+  }
+  input.images = await backupDraftImages(input.images);
+  // Downloads yield: re-read before committing so concurrent edits/deletion win.
+  if (previous) {
+    const current = get<Draft>('drafts', previous.id);
+    if (!current || (current.revision || 0) !== (previous.revision || 0)) {
+      res.status(409).json({ error: '草稿在素材备份期间已修改或删除，本次保存未覆盖已有记录' });
+      return;
+    }
+  }
   const source = get<Note>('notes', input.noteId);
   const d: Draft = {
     ...input,
     platform: input.platform || source?.platform || 'xiaohongshu',
     id,
     status: 'draft',
+    revision: id === previous?.id ? (previous.revision || 0) + 1 : 1,
     createdAt: previous?.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
@@ -803,7 +879,7 @@ app.post('/api/media/video', upload.single('file'), async (req, res) => {
 });
 app.get('/api/media/:file', (req, res) => {
   const name = String(req.params.file);
-  if (!/^[a-f0-9-]+\.(mp4|webm|mov)$/.test(name)) {
+  if (!/^[a-f0-9-]+\.(mp4|webm|mov|png|jpe?g|webp)$/.test(name)) {
     res.status(400).json({ error: '无效素材' });
     return;
   }
@@ -822,7 +898,87 @@ app.put('/api/llm', (req, res) => {
   res.json(saveLlmSettings(req.body));
 });
 app.post('/api/llm/models/sync', async (_req, res) => res.json(await syncModels()));
+app.post('/api/llm/models', (req, res) => {
+  addServiceModel('text', req.body);
+  res.status(201).json(llmSettings());
+});
+app.delete('/api/llm/models/:id', (req, res) => {
+  removeServiceModel('text', String(req.params.id));
+  res.json(llmSettings());
+});
 app.post('/api/llm/test', async (_req, res) => res.json(await testLlm()));
+app.get('/api/images/generations', (_req, res) => res.json(generationHistory()));
+app.get('/api/images', (_req, res) => res.json(imageSettings()));
+app.put('/api/images', (req, res) => {
+  res.json(saveImageSettings(req.body));
+});
+app.post('/api/images/check', async (_req, res) => {
+  res.json(await checkImageService());
+});
+app.post('/api/images/reuse-llm', (_req, res) => {
+  try {
+    res.json(reuseLlmService());
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : '无法复用大模型服务' });
+  }
+});
+app.post('/api/images/models', (req, res) => {
+  addServiceModel('image', req.body);
+  res.status(201).json(imageSettings());
+});
+app.delete('/api/images/models/:id', (req, res) => {
+  removeServiceModel('image', String(req.params.id));
+  res.json(imageSettings());
+});
+app.post('/api/images/models/sync', async (_req, res) => {
+  try {
+    res.json(await syncImageModels());
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : '同步模型失败' });
+  }
+});
+app.post('/api/images/test', async (_req, res) => {
+  try {
+    res.json(await testImageGeneration());
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : '测试生图失败' });
+  }
+});
+app.post('/api/images/variants', async (req, res) => {
+  const input = variantsSchema.parse(req.body);
+  if (!imageSettings().baseUrl || !imageSettings().model) {
+    res.status(400).json({ error: '请先配置生图服务地址与模型' });
+    return;
+  }
+  try {
+    res.json(await generateVariants(input));
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : '生图失败' });
+  }
+});
+app.post('/api/copy/rewrite', async (req, res) => {
+  const input = rewriteInputSchema.parse(req.body);
+  try {
+    res.json(await rewriteCopy(input));
+  } catch (error) {
+    if (error instanceof z.ZodError) throw error;
+    const message = error instanceof Error ? error.message : '文案改写失败';
+    res.status(/敏感主题/.test(message) ? 400 : 502).json({ error: message });
+  }
+});
+app.get('/api/services', (req, res) => {
+  const kind = req.query.kind === 'image' ? 'image' : 'text';
+  res.json(listServices(kind));
+});
+app.post('/api/services', (req, res) => {
+  res.status(201).json(createService(req.body));
+});
+app.post('/api/services/:id/activate', (req, res) => {
+  res.json(activateService(String(req.params.id)));
+});
+app.delete('/api/services/:id', (req, res) => {
+  res.json(deleteService(String(req.params.id)));
+});
 function rejectCommentSource(res: express.Response, platform: string | undefined, mode: string) {
   if (platform !== 'douyin' || mode !== 'live' || douyinProvider() !== 'redfox') return false;
   res.status(400).json({ error: redfoxCommentNotice });
@@ -1194,8 +1350,28 @@ app.get('/api/drafts/:id/bundle', async (req, res) => {
       );
     else if (/^\/assets\/[\w.-]+$/.test(im)) {
       const { readFile } = await import('node:fs/promises');
-      zip.file(`images/${i + 1}.svg`, await readFile(resolve('public' + im)));
-    } else zip.file(`images/${i + 1}-url.txt`, im);
+      zip.file(`images/${i + 1}.${im.split('.').at(-1)}`, await readFile(resolve('public' + im)));
+    } else if (/^\/api\/media\/[a-f0-9-]+\.(png|jpe?g|webp)$/.test(im)) {
+      const { readFile } = await import('node:fs/promises');
+      zip.file(
+        `images/${i + 1}.${im.split('.').at(-1)}`,
+        await readFile(join(uploads, im.split('/').at(-1)!)),
+      );
+    } else if (/^https?:\/\//.test(im)) {
+      const bytes = await downloadMedia(im, 10 * 1024 * 1024);
+      const mime = imageMime(bytes);
+      zip.file(
+        `images/${i + 1}.${mime === 'image/png' ? 'png' : mime === 'image/webp' ? 'webp' : 'jpg'}`,
+        bytes,
+      );
+    } else throw new Error('草稿包含无法导出的素材，请重新上传后保存');
+  }
+  if (d.kind === 'video' && d.video && /^\/api\/media\/[a-f0-9-]+\.(mp4|webm|mov)$/.test(d.video)) {
+    const { readFile } = await import('node:fs/promises');
+    zip.file(
+      `video.${d.video.split('.').at(-1)}`,
+      await readFile(join(uploads, d.video.split('/').at(-1)!)),
+    );
   }
   res
     .type('application/zip')

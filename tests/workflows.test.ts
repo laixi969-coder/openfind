@@ -431,3 +431,170 @@ test('Expanded workflow collects more than five works and popular search honors 
   assert.equal(w.completedNoteIds.length, 12);
   assert.deepEqual(seen, Array(12).fill(100));
 });
+
+test('restart reuses a completed child even outside cache TTL before advancing the parent checkpoint', async () => {
+  const w = createWorkflow({ ...input, keyword: 'crash-completed', supplement: false });
+  const n = note('crash-completed-note');
+  put('notes', n);
+  w.currentJobId = 'completed-before-parent';
+  w.searchJobIds = [w.currentJobId];
+  put('jobs', {
+    id: w.currentJobId,
+    type: 'search',
+    status: 'completed',
+    keyword: w.input.keyword,
+    query: { keyword: w.input.keyword, limit: w.input.searchLimit, sort: 'latest' },
+    source: w.input.mode,
+    platform: w.input.platform,
+    resultIds: [n.id],
+    count: 1,
+    pages: 1,
+    elapsed: 0,
+    logs: [],
+    createdAt: '2020-01-01',
+    finishedAt: '2020-01-01',
+  });
+  put('workflows', w);
+  recoverWorkflows();
+  const restored = get<AcquisitionWorkflow>('workflows', w.id)!;
+  await runWorkflow(restored, async (j) => {
+    assert.equal(j.type, 'comments', 'completed paid search must not be repeated');
+    j.status = 'completed';
+    put('jobs', j);
+  });
+  assert.equal(restored.status, 'completed');
+  assert.equal(restored.searchIndex, 1);
+  assert.deepEqual(restored.selectedNoteIds, [n.id]);
+  assert.equal(restored.currentJobId, undefined);
+});
+
+test('paused pagination resumes the same child with its persisted cursor and accumulated results', async () => {
+  const w = createWorkflow({ ...input, keyword: 'resume-pagination', supplement: false });
+  const a = note('page-a'),
+    b = note('page-b');
+  let firstJob = '';
+  await runWorkflow(w, async (j) => {
+    assert.equal(j.type, 'search');
+    firstJob = j.id;
+    put('notes', a);
+    j.resultIds = [a.id];
+    j.count = 1;
+    j.pages = 1;
+    j.checkpoint = { nextCursor: 'page-2', visitedCursors: [] };
+    j.status = 'stopped';
+    put('jobs', j);
+    workflowRuns.get(w.id)!.abort();
+  });
+  assert.equal(w.status, 'paused');
+  const restored = get<AcquisitionWorkflow>('workflows', w.id)!;
+  await runWorkflow(restored, async (j) => {
+    if (j.type === 'search') {
+      assert.equal(j.id, firstJob);
+      assert.equal(j.checkpoint?.nextCursor, 'page-2');
+      assert.deepEqual(j.resultIds, [a.id]);
+      put('notes', b);
+      j.resultIds.push(b.id);
+    }
+    j.status = 'completed';
+    put('jobs', j);
+  });
+  assert.equal(restored.status, 'completed');
+  assert.deepEqual(new Set(restored.noteIds), new Set([a.id, b.id]));
+});
+
+test('an executor exception still reconciles saved partial evidence before pausing', async () => {
+  const w = createWorkflow({ ...input, keyword: 'throws-partial', supplement: false });
+  const n = note('throws-note');
+  await runWorkflow(w, async (j) => {
+    if (j.type === 'search') {
+      put('notes', n);
+      j.resultIds = [n.id];
+      j.status = 'completed';
+      put('jobs', j);
+      return;
+    }
+    const c = comment(n, 'throws-comment');
+    put('comments', c);
+    j.resultIds = [c.id];
+    put('jobs', j);
+    throw new Error('unexpected executor failure');
+  });
+  assert.equal(w.status, 'paused');
+  assert.deepEqual(w.commentIds, ['throws-comment']);
+  assert.equal(w.leadIds.length, 1);
+  assert.equal(get<any>('jobs', w.currentJobId!).status, 'failed');
+});
+
+test('a persisted terminal page finishes locally even when platform quota is exhausted', async () => {
+  configSet('douyin.provider', 'browser');
+  configSet(
+    'protection:douyin',
+    JSON.stringify({
+      ...freshProtection(),
+      counts: { search: 100, comments: 100, publish: 0, prepare: 0 },
+    }),
+  );
+  const w = createWorkflow({ ...input, mode: 'live', keyword: 'terminal-page', supplement: false });
+  w.currentJobId = 'terminal-child';
+  put('jobs', {
+    id: w.currentJobId,
+    type: 'search',
+    status: 'stopped',
+    keyword: w.input.keyword,
+    source: 'live',
+    platform: 'douyin',
+    query: { keyword: w.input.keyword, sort: 'latest', limit: w.input.searchLimit },
+    count: 0,
+    pages: 1,
+    resultIds: [],
+    logs: [],
+    elapsed: 0,
+    checkpoint: { nextCursor: null, visitedCursors: [] },
+    createdAt: new Date().toISOString(),
+  });
+  await runWorkflow(w, async (j) => {
+    assert.equal(j.id, 'terminal-child');
+    j.status = 'completed';
+    put('jobs', j);
+  });
+  assert.equal(w.status, 'completed');
+});
+
+test('requalification prefers newer valid evidence over an older higher score without resetting CRM edits', async () => {
+  const { toLead } = await import('../server/domain.ts');
+  const n = note('newer-evidence-note');
+  put('notes', n);
+  const older = {
+    ...comment(n, 'older-high', '想买，求链接'),
+    authorId: 'same-buyer',
+    createdAt: new Date(Date.now() - 2 * 86400000).toISOString(),
+  };
+  const newer = {
+    ...comment(n, 'newer-low', '多少钱'),
+    authorId: 'same-buyer',
+    createdAt: new Date(Date.now() - 86400000).toISOString(),
+  };
+  put('comments', older);
+  put('comments', newer);
+  const existing = {
+    ...toLead(older, n),
+    memo: '人工填写',
+    outreach: '人工话术',
+    status: 'contacted' as const,
+    revision: 7,
+  };
+  put('leads', existing);
+  const w = createWorkflow({ ...input, keyword: 'newer evidence' });
+  w.stage = 'assess';
+  w.noteIds = [n.id];
+  w.selectedNoteIds = [n.id];
+  w.commentIds = [older.id, newer.id];
+  await runWorkflow(w, async () => assert.fail('local requalification only'));
+  const saved = get<any>('leads', existing.id);
+  assert.equal(saved.commentId, newer.id);
+  assert.equal(saved.memo, '人工填写');
+  assert.equal(saved.outreach, '人工话术');
+  assert.equal(saved.status, 'contacted');
+  assert.equal(saved.revision, 7);
+  assert.deepEqual(w.leadIds, [existing.id]);
+});

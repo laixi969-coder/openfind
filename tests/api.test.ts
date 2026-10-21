@@ -156,7 +156,7 @@ test('comment replies retain parent relationships; leads are idempotent and edit
   const lead = (await state()).leads[0];
   await json(
     '/api/leads/' + encodeURIComponent(lead.id),
-    { memo: '下周跟进', status: 'qualified' },
+    { revision: lead.revision || 0, memo: '下周跟进', status: 'qualified' },
     'PATCH',
   );
   assert.equal((await state()).leads.find((l) => l.id === lead.id)?.status, 'qualified');
@@ -183,7 +183,12 @@ test('draft validation and ZIP export remain available while platform publishing
     assert.equal((await request(`/api/drafts/${d.id}/${action}`, {})).status, 410);
   }
   assert.equal((await state()).drafts.find((x) => x.id === d.id)?.status, 'draft');
-  const updated = await json<Draft>('/api/drafts', { ...input, id: d.id, title: '修改后保存' });
+  const updated = await json<Draft>('/api/drafts', {
+    ...input,
+    id: d.id,
+    revision: d.revision,
+    title: '修改后保存',
+  });
   assert.equal(updated.id, d.id);
 });
 test('credentials encrypted at rest and never returned, session-only preference clears disk copy', async () => {
@@ -237,7 +242,11 @@ test('multiple accounts keep credentials separate and can be selected for publis
 });
 test('CSV escapes spreadsheet formulas and unknown exports return an error', async () => {
   const lead = (await state()).leads[0];
-  await json('/api/leads/' + encodeURIComponent(lead.id), { memo: '=HYPERLINK("bad")' }, 'PATCH');
+  await json(
+    '/api/leads/' + encodeURIComponent(lead.id),
+    { revision: lead.revision || 0, memo: '=HYPERLINK("bad")' },
+    'PATCH',
+  );
   const csv = await (await request('/api/export/leads?format=csv')).text();
   assert.ok(csv.includes("'=HYPERLINK"));
   assert.equal((await request('/api/export/secrets')).status, 400);
@@ -443,5 +452,473 @@ test('Model config never exposes keys and completed workflow reviews route befor
     (await request('/api/llm', { enabled: true, baseUrl: '', model: '', maxComments: 100 }, 'PUT'))
       .status,
     400,
+  );
+});
+
+test('AI image generation requires configuration before calling any provider', async () => {
+  const initial = await json<any>('/api/images');
+  assert.equal(initial.baseUrl, '');
+  assert.equal(initial.hasApiKey, false);
+  assert.equal(initial.mode, 'edit');
+  const result = await request('/api/images/variants', {
+    images: ['https://example.com/a.png'],
+    prompt: '保持构图，替换品牌',
+    count: 1,
+  });
+  assert.equal(result.status, 400);
+  assert.match((await result.json()).error, /配置生图服务/);
+});
+
+test('Image service settings stay on this machine and never expose the key', async () => {
+  assert.equal(
+    (
+      await request(
+        '/api/images',
+        { baseUrl: 'http://example.com/v1', model: 'mock', size: '1024x1536', mode: 'edit' },
+        'PUT',
+      )
+    ).status,
+    400,
+  );
+  const saved = await json<any>(
+    '/api/images',
+    {
+      baseUrl: 'http://127.0.0.1:1/v1',
+      model: 'mock-image',
+      apiKey: 'image-secret-for-test',
+      size: '1024x1024',
+      mode: 'edit',
+    },
+    'PUT',
+  );
+  assert.equal(saved.hasApiKey, true);
+  assert.equal(saved.size, '1024x1024');
+  assert.ok(!JSON.stringify(saved).includes('image-secret-for-test'));
+  const read = await json<any>('/api/images');
+  assert.equal(read.model, 'mock-image');
+  assert.ok((await request('/api/images/check', {})).ok);
+});
+
+test('Reference-image generation stores variants locally and they can be published as draft assets', async (t) => {
+  const { createServer } = await import('node:http');
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j5p8AAAAASUVORK5CYII=',
+    'base64',
+  );
+  const provider = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks);
+      res.setHeader('content-type', 'application/json');
+      if (req.url === '/v1/models') {
+        res.end(JSON.stringify({ data: [{ id: 'mock-image' }] }));
+        return;
+      }
+      if (req.url === '/v1/images/edits' && !raw.includes('mock-unsupported')) {
+        assert.ok(raw.includes('name="prompt"'), 'edit request must carry the prompt');
+        res.end(JSON.stringify({ data: [{ b64_json: png.toString('base64') }] }));
+        return;
+      }
+      if (req.url === '/v1/images/generations') {
+        res.end(JSON.stringify({ data: [{ b64_json: png.toString('base64') }] }));
+        return;
+      }
+      res.statusCode = 404;
+      res.end(JSON.stringify({ error: { message: 'images/edits not supported' } }));
+    });
+  });
+  provider.listen(0, '127.0.0.1');
+  await new Promise<void>((r) => provider.once('listening', r));
+  t.after(() => provider.close());
+  const port = (provider.address() as { port: number }).port;
+  await json(
+    '/api/images',
+    {
+      baseUrl: 'http://127.0.0.1:' + port + '/v1',
+      model: 'mock-image',
+      apiKey: '',
+      size: '1024x1536',
+      mode: 'edit',
+    },
+    'PUT',
+  );
+  const checked = await json<{ ok: boolean; message: string }>('/api/images/check', {});
+  assert.equal(checked.ok, true);
+  assert.match(checked.message, /mock-image/);
+
+  const invalid = await request('/api/images/variants', {
+    images: ['data:image/png;base64,' + Buffer.from('png-bytes').toString('base64')],
+    prompt: '拒绝伪造图片',
+    count: 1,
+  });
+  assert.equal(invalid.status, 502);
+  assert.match((await invalid.json()).error, /不是 PNG/);
+  const source = png.toString('base64');
+  const generated = await json<import('../shared/types.ts').ImageGeneration>(
+    '/api/images/variants',
+    {
+      images: ['data:image/png;base64,' + source],
+      prompt: '保留构图与主体，替换为我的品牌',
+      count: 1,
+    },
+  );
+  assert.equal(generated.items.length, 1);
+  assert.match(generated.items[0].url, /^\/api\/media\/[a-f0-9-]+\.png$/);
+  assert.equal(generated.items[0].source, 'data:image/png;base64,' + source);
+  const file = await fetch(base + generated.items[0].url);
+  assert.equal(file.status, 200);
+  assert.equal(file.headers.get('content-type'), 'image/png');
+  assert.equal(Buffer.from(await file.arrayBuffer()).length, png.length);
+
+  const snapshot = await state();
+  const draft = await json<Draft>('/api/drafts', {
+    noteId: snapshot.notes[0].id,
+    title: 'AI 重绘草稿',
+    body: '用生成图替换素材',
+    tags: ['测试'],
+    images: [generated.items[0].url],
+    visibility: 'public',
+    accountId: snapshot.accounts[0].id,
+    platform: 'xiaohongshu',
+    kind: 'image',
+    origin: 'clone',
+  });
+  assert.deepEqual(draft.images, [generated.items[0].url]);
+
+  await json(
+    '/api/images',
+    {
+      baseUrl: 'http://127.0.0.1:' + port + '/v1',
+      model: 'mock-unsupported',
+      apiKey: '',
+      size: '1024x1536',
+      mode: 'edit',
+    },
+    'PUT',
+  );
+  const unsupported = await request('/api/images/variants', {
+    images: ['data:image/png;base64,' + source],
+    prompt: '保留构图',
+    count: 1,
+  });
+  assert.equal(unsupported.status, 502);
+  assert.match((await unsupported.json()).error, /不支持图生图/);
+});
+
+test('Image settings reuse the chat service, sync models and test a real generation', async (t) => {
+  const { createServer } = await import('node:http');
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j5p8AAAAASUVORK5CYII=',
+    'base64',
+  );
+  let generationBody = '';
+  const provider = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      const body = Buffer.concat(chunks).toString();
+      res.setHeader('content-type', 'application/json');
+      if (req.url === '/v1/models')
+        return res.end(JSON.stringify({ data: [{ id: 'mock-image' }, { id: 'mock-image-pro' }] }));
+      if (req.url === '/v1/images/generations') generationBody = body;
+      if (req.url === '/v1/images/generations' || req.url === '/v1/images/edits')
+        return res.end(JSON.stringify({ data: [{ b64_json: png.toString('base64') }] }));
+      res.statusCode = 404;
+      res.end(JSON.stringify({ error: { message: 'not found' } }));
+    });
+  });
+  provider.listen(0, '127.0.0.1');
+  await new Promise<void>((r) => provider.once('listening', r));
+  t.after(() => provider.close());
+  const port = (provider.address() as { port: number }).port;
+  const llmBase = 'http://127.0.0.1:' + port + '/v1';
+  await json(
+    '/api/llm',
+    {
+      enabled: false,
+      baseUrl: llmBase,
+      model: 'example-chat',
+      apiKey: 'reuse-key-for-test',
+      maxComments: 100,
+    },
+    'PUT',
+  );
+
+  const reused = await json<{
+    settings: import('../shared/types.ts').ImageSettings;
+    copiedKey: boolean;
+  }>('/api/images/reuse-llm', {});
+  assert.equal(reused.settings.baseUrl, llmBase);
+  assert.equal(reused.copiedKey, true);
+  assert.equal(reused.settings.hasApiKey, true);
+  // 对话模型不能当生图模型用，复用只搬地址与 Key
+  assert.equal(reused.settings.model, 'mock-unsupported');
+
+  const synced = await json<import('../shared/types.ts').ImageSettings>(
+    '/api/images/models/sync',
+    {},
+  );
+  assert.ok(
+    ['mock-image', 'mock-image-pro'].every((id) =>
+      synced.models.some((m) => m.id === id && !m.custom),
+    ),
+  );
+  assert.ok(synced.modelsSyncedAt);
+
+  await json(
+    '/api/images',
+    {
+      baseUrl: llmBase,
+      model: 'mock-unsupported',
+      size: '1024x1536',
+      mode: 'generate',
+      watermark: false,
+    },
+    'PUT',
+  );
+  const tested = await json<{ model: string; sample: string; via: string }>('/api/images/test', {});
+  assert.equal(tested.via, 'generations');
+  assert.match(generationBody, /"watermark_enabled":false/);
+  assert.match(tested.sample, /^\/api\/media\/[a-f0-9-]+\.png$/);
+  assert.equal((await fetch(base + tested.sample)).status, 200);
+});
+
+test('Copy rewrite rewrites instead of copying, and refuses sensitive topics', async (t) => {
+  const { createServer } = await import('node:http');
+  const answer = {
+    titles: ['装修预算别乱花，先看这三处', '装修预算别乱花，先看这三处', '90%的人都把预算花反了'],
+    hooks: ['先说结论：预算要先给看不见的地方。', '装修最容易超支的不是材料。'],
+    body: '先说结论：预算要先给看不见的地方。\n水电、防水、五金这三处省不得，后面返工更贵。\n你家预算最先砍的是哪一项？',
+    tags: ['#装修', '预算', '装修避坑'],
+    avoid: ['最', '第一'],
+  };
+  const provider = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      res.setHeader('content-type', 'application/json');
+      if (req.url !== '/v1/chat/completions') {
+        res.statusCode = 404;
+        return res.end('{}');
+      }
+      const raw = Buffer.concat(chunks).toString();
+      const content = raw.includes('bad-json-model') ? '不是 JSON' : JSON.stringify(answer);
+      res.end(JSON.stringify({ choices: [{ message: { content } }] }));
+    });
+  });
+  provider.listen(0, '127.0.0.1');
+  await new Promise<void>((r) => provider.once('listening', r));
+  t.after(() => provider.close());
+  const port = (provider.address() as { port: number }).port;
+  const baseUrl = 'http://127.0.0.1:' + port + '/v1';
+  await json(
+    '/api/llm',
+    {
+      enabled: false,
+      baseUrl,
+      model: 'copy-model',
+      apiKey: 'copy-key-for-test',
+      maxComments: 100,
+    },
+    'PUT',
+  );
+
+  const note = (await state()).notes.find((n) => n.title && n.body.length > 30)!;
+  const result = await json<import('../shared/types.ts').CopyRewrite>('/api/copy/rewrite', {
+    noteId: note.id,
+    style: 'spoken',
+  });
+  assert.equal(result.titles.length, 2);
+  assert.ok(result.titles.every((title) => title.length <= 20));
+  assert.deepEqual(result.tags, ['装修', '预算', '装修避坑']);
+  assert.ok(result.body.includes('\n'));
+  assert.ok(result.overlap >= 0 && result.overlap <= 1);
+  assert.equal(result.model, 'copy-model');
+  assert.ok(result.hooks.length >= 2);
+  assert.deepEqual(result.avoid, ['最', '第一']);
+
+  const sensitive = {
+    ...note,
+    id: 'copy-sensitive-note',
+    title: 'HPV治疗记录',
+    body: '公开健康主题',
+  };
+  const { put, remove } = await import('../server/store.ts');
+  put('notes', sensitive);
+  const blocked = await request('/api/copy/rewrite', { noteId: sensitive.id });
+  assert.equal(blocked.status, 400);
+  assert.match((await blocked.json()).error, /敏感主题/);
+  remove('notes', sensitive.id);
+
+  await json(
+    '/api/llm',
+    {
+      enabled: false,
+      baseUrl,
+      model: 'bad-json-model',
+      maxComments: 100,
+    },
+    'PUT',
+  );
+  const broken = await request('/api/copy/rewrite', { noteId: note.id });
+  assert.equal(broken.status, 502);
+});
+
+test('Model libraries accept custom text and image models and expose them for selection', async () => {
+  const text = await json<import('../shared/types.ts').LlmSettings>('/api/llm/models', {
+    id: 'glm-custom-test',
+  });
+  const custom = text.models.find((m) => m.id === 'glm-custom-test');
+  assert.equal(custom?.custom, true);
+  assert.equal(text.model, 'bad-json-model');
+
+  const dup = await json<import('../shared/types.ts').LlmSettings>('/api/llm/models', {
+    id: 'glm-custom-test',
+  });
+  assert.equal(dup.models.filter((m) => m.id === 'glm-custom-test').length, 1);
+
+  assert.equal((await request('/api/llm/models', { id: 'bad model!' })).status, 400);
+
+  const removed = await json<import('../shared/types.ts').LlmSettings>(
+    '/api/llm/models/glm-custom-test',
+    undefined,
+    'DELETE',
+  );
+  assert.ok(!removed.models.some((m) => m.id === 'glm-custom-test'));
+
+  const image = await json<import('../shared/types.ts').ImageSettings>('/api/images/models', {
+    id: 'cogview-4',
+  });
+  assert.equal(image.models.find((m) => m.id === 'cogview-4')?.custom, true);
+  assert.equal(image.model, 'mock-unsupported');
+  const imageRemoved = await json<import('../shared/types.ts').ImageSettings>(
+    '/api/images/models/cogview-4',
+    undefined,
+    'DELETE',
+  );
+  assert.ok(!imageRemoved.models.some((m) => m.id === 'cogview-4'));
+});
+
+test('Multiple model services keep separate addresses, keys and models', async () => {
+  const before = await json<import('../shared/types.ts').LlmSettings>('/api/llm');
+  assert.equal(
+    (
+      await request('/api/services', {
+        kind: 'text',
+        name: '',
+        baseUrl: 'https://example.com/v1',
+      })
+    ).status,
+    400,
+  );
+  assert.equal(
+    (
+      await request('/api/services', {
+        kind: 'text',
+        name: '明文 HTTP',
+        baseUrl: 'http://example.com/v1',
+      })
+    ).status,
+    400,
+  );
+
+  const created = await json<import('../shared/types.ts').ModelService>('/api/services', {
+    kind: 'text',
+    name: '备用服务',
+    baseUrl: 'https://example.com/v1',
+    apiKey: 'second-key',
+    model: 'backup-model',
+  });
+  assert.equal(created.active, true);
+  assert.equal(created.hasApiKey, true);
+  const switched = await json<import('../shared/types.ts').LlmSettings>('/api/llm');
+  assert.equal(switched.baseUrl, 'https://example.com/v1');
+  assert.equal(switched.model, 'backup-model');
+  assert.equal(switched.hasApiKey, true);
+  assert.ok(switched.models.some((m) => m.id === 'backup-model'));
+
+  const list = await json<import('../shared/types.ts').ModelService[]>('/api/services?kind=text');
+  assert.ok(list.length >= 2);
+  assert.ok(!JSON.stringify(list).includes('second-key'));
+  const previous = list.find((s) => !s.active)!;
+  await json('/api/services/' + previous.id + '/activate', {});
+  const restored = await json<import('../shared/types.ts').LlmSettings>('/api/llm');
+  assert.equal(restored.baseUrl, before.baseUrl);
+  assert.equal(restored.model, before.model);
+
+  await json('/api/services/' + created.id, undefined, 'DELETE');
+  assert.ok(
+    !(await json<import('../shared/types.ts').ModelService[]>('/api/services?kind=text')).some(
+      (s) => s.id === created.id,
+    ),
+  );
+});
+
+test('video draft bundles contain the original uploaded video bytes', async () => {
+  const { writeFileSync } = await import('node:fs');
+  const JSZip = (await import('jszip')).default;
+  const bytes = Buffer.from('test-video-bytes');
+  writeFileSync(join(dir, 'uploads', 'abcdef.mp4'), bytes);
+  const draft = await json<Draft>('/api/drafts', {
+    noteId: '',
+    origin: 'original',
+    kind: 'video',
+    title: '视频导出测试',
+    body: '正文',
+    tags: [],
+    images: [],
+    video: '/api/media/abcdef.mp4',
+    visibility: 'private',
+    accountId: (await state()).accounts[0].id,
+  });
+  const response = await request(`/api/drafts/${draft.id}/bundle`);
+  assert.equal(response.status, 200);
+  const zip = await JSZip.loadAsync(await response.arrayBuffer());
+  assert.deepEqual(await zip.file('video.mp4')!.async('nodebuffer'), bytes);
+});
+
+test('stale CRM edits are rejected and current manual changes survive', async () => {
+  const lead = (await state()).leads[0];
+  const path = '/api/leads/' + encodeURIComponent(lead.id);
+  const revision = lead.revision || 0;
+  assert.equal((await request(path, { revision, memo: '窗口A的记录' }, 'PATCH')).status, 200);
+  assert.equal((await request(path, { revision, memo: '窗口B的旧记录' }, 'PATCH')).status, 409);
+  assert.equal((await request(path, { memo: '缺少版本' }, 'PATCH')).status, 400);
+  assert.equal((await state()).leads.find((l) => l.id === lead.id)?.memo, '窗口A的记录');
+});
+
+test('draft optimistic revisions reject stale edits, deleted records and missing local media', async () => {
+  const note = (await state()).notes[0];
+  const input = {
+    noteId: note.id,
+    title: '草稿并发',
+    body: '',
+    tags: [],
+    images: note.images,
+    visibility: 'private',
+    accountId: 'demo-account',
+  };
+  const d = await json<Draft>('/api/drafts', input);
+  const newer = await json<Draft>('/api/drafts', {
+    ...input,
+    id: d.id,
+    revision: d.revision,
+    title: '窗口A',
+  });
+  assert.equal(
+    (await request('/api/drafts', { ...input, id: d.id, revision: d.revision, title: '窗口B' }))
+      .status,
+    409,
+  );
+  assert.equal((await state()).drafts.find((x) => x.id === d.id)?.title, '窗口A');
+  assert.equal(
+    (await request('/api/drafts', { ...input, images: ['/api/media/deadbeef.png'] })).status,
+    400,
+  );
+  await request('/api/drafts/' + d.id, undefined, 'DELETE');
+  assert.equal(
+    (await request('/api/drafts', { ...input, id: d.id, revision: newer.revision })).status,
+    404,
   );
 });

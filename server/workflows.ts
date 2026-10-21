@@ -1,3 +1,4 @@
+import { saveCollectedLead } from './leads.ts';
 import { douyinUsesApi, requireDouyinComments } from './douyin-data.ts';
 import { workflowErrorMessage } from './workflow-errors.ts';
 import { reviewSemantics, semanticFor, llmSettings } from './llm.ts';
@@ -13,15 +14,9 @@ import type {
   Lead,
   SearchInput,
 } from '../shared/types.ts';
-import { all, get, put } from './store.ts';
+import { all, get, put, transaction } from './store.ts';
 import { cachedJob } from './jobs-cache.ts';
-import {
-  acquisitionPriority,
-  assessComment,
-  intentScore,
-  toLead,
-  qualificationVersion,
-} from './domain.ts';
+import { acquisitionPriority, assessComment, intentScore, qualificationVersion } from './domain.ts';
 import { evaluateBudget, readInterval, protectionStatus } from './protection.ts';
 import { parseWorkLink, parseWorkLinks } from '../shared/work-links.ts';
 
@@ -133,19 +128,8 @@ export function qualify(w: AcquisitionWorkflow) {
     );
   const ids = new Set<string>();
   for (const { c, note } of candidates) {
-    const lead = toLead(c, note, all<Comment>('comments'));
-    if (ids.has(lead.id)) continue;
-    ids.add(lead.id);
-    const existing = get<Lead>('leads', lead.id);
-    if (!existing) put('leads', lead);
-    else if (lead.commentCreatedAt! >= (existing.commentCreatedAt || ''))
-      put('leads', {
-        ...lead,
-        status: existing.status,
-        memo: existing.memo,
-        outreach: existing.outreach,
-        createdAt: existing.createdAt,
-      });
+    const { lead } = saveCollectedLead(c, note, all<Comment>('comments'));
+    if (lead.assessment?.recommended && lead.assessment.withinSevenDays === true) ids.add(lead.id);
   }
   w.leadIds = [...ids];
   saveWorkflow(w);
@@ -276,26 +260,42 @@ export async function runWorkflow(
       interval: 250,
       forceRefresh: false,
     };
-    const j: Job = {
-      id: randomUUID(),
-      type,
-      status: 'running',
-      keyword: query.keyword,
-      noteId: note?.id,
-      count: 0,
-      pages: 0,
-      elapsed: 0,
-      resultIds: [],
-      logs: [],
-      source: w.input.mode,
-      platform: w.input.platform,
-      query,
-      createdAt: new Date().toISOString(),
-    };
-    if (!cachedJob(j, query)) await waitForPlatform(w, type, abort.signal);
+    const previous = w.currentJobId ? get<Job>('jobs', w.currentJobId) : undefined;
+    const reusable =
+      previous &&
+      previous.type === type &&
+      previous.noteId === note?.id &&
+      previous.source === w.input.mode &&
+      previous.platform === w.input.platform &&
+      previous.query?.sort === sort &&
+      previous.query?.keyword === query.keyword &&
+      previous.query?.limit === query.limit &&
+      (previous.status === 'completed' || previous.checkpoint);
+    const j: Job = reusable
+      ? previous
+      : {
+          id: randomUUID(),
+          type,
+          status: 'running',
+          keyword: query.keyword,
+          noteId: note?.id,
+          count: 0,
+          pages: 0,
+          elapsed: 0,
+          resultIds: [],
+          logs: [],
+          source: w.input.mode,
+          platform: w.input.platform,
+          query,
+          createdAt: new Date().toISOString(),
+        };
+    const locallyComplete =
+      j.status === 'completed' ||
+      (j.checkpoint && (j.checkpoint.nextCursor === null || j.count >= query.limit));
+    if (!locallyComplete && !cachedJob(j, query)) await waitForPlatform(w, type, abort.signal);
     abort.signal.throwIfAborted();
     w.currentJobId = j.id;
-    if (type === 'search') w.searchJobIds.push(j.id);
+    if (type === 'search' && !w.searchJobIds.includes(j.id)) w.searchJobIds.push(j.id);
     put('jobs', j);
     saveWorkflow(
       w,
@@ -303,7 +303,20 @@ export async function runWorkflow(
         ? `正在采集评论：${note.title}（最多${w.input.commentLimit}条，含回复）`
         : `正在${sort === 'latest' ? '最新发布' : sort === 'general' ? '相关作品' : '高互动'}搜索：${w.input.keyword}`,
     );
-    await execute(j, query, abort.signal);
+    let executionError: unknown;
+    if (j.status !== 'completed') {
+      j.status = 'running';
+      delete j.error;
+      put('jobs', j);
+      try {
+        await execute(j, query, abort.signal);
+      } catch (error) {
+        executionError = error;
+        j.status = abort.signal.aborted ? 'stopped' : 'failed';
+        j.error = error instanceof Error ? error.message : '子任务执行失败';
+        put('jobs', j);
+      }
+    }
     if (type === 'search') w.noteIds = scopedNotes(w, [...w.noteIds, ...j.resultIds]);
     else {
       const matching = j.resultIds.filter((id) => {
@@ -319,10 +332,9 @@ export async function runWorkflow(
     }
     saveWorkflow(w);
     abort.signal.throwIfAborted();
+    if (executionError) throw executionError;
     if (j.status !== 'completed')
       throw new Error(j.error || '采集已停止；已保存结果，点击继续可重试当前步骤');
-    w.currentJobId = undefined;
-    saveWorkflow(w);
   }
   try {
     requireDouyinComments(w.input.platform, w.input.mode);
@@ -355,10 +367,14 @@ export async function runWorkflow(
           throw new Error('指定链接与返回作品身份不一致，已停止采集');
         if (intentScore('', '', note.title + '\n' + note.body).stage === 'restricted')
           throw new Error('该作品涉及敏感主题，不执行个人营销线索流程；可在发现作品中进行内容研究');
-        put('notes', note);
-        w.linkNoteIds[url] = note.id;
-        w.noteIds = scopedNotes(w, [...w.noteIds, note.id]);
-        saveWorkflow(w, `已确认指定作品：${note.title}`);
+        const next = structuredClone(w);
+        transaction(() => {
+          put('notes', note);
+          next.linkNoteIds![url] = note.id;
+          next.noteIds = scopedNotes(next, [...next.noteIds, note.id]);
+          saveWorkflow(next, `已确认指定作品：${note.title}`);
+        });
+        Object.assign(w, next);
       }
       w.selectedNoteIds = [...w.noteIds];
       w.stage = 'comments';
@@ -388,6 +404,7 @@ export async function runWorkflow(
         }
         await child('search', sorts[w.searchIndex]);
         w.searchIndex++;
+        w.currentJobId = undefined;
         // Previously found works for this exact topic may have new comments despite an older publication date.
         const known = all<Job>('jobs').filter(
           (j) =>
@@ -429,6 +446,7 @@ export async function runWorkflow(
         if (!note) throw new Error('选定作品已不存在，请重新开始流程');
         await child('comments', 'general', note);
         w.completedNoteIds.push(id);
+        w.currentJobId = undefined;
         saveWorkflow(w);
       }
       w.stage = 'assess';

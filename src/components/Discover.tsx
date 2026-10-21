@@ -74,6 +74,7 @@ export function Discover() {
     [forceRefresh, setForceRefresh] = useState(false),
     [detail, setDetail] = useState<Note | null>(null),
     [zipBusy, setZipBusy] = useState(false),
+    [cloningId, setCloningId] = useState(''),
     [jobId, setJobId] = useState(params.get('job') || ''),
     [planText, setPlanText] = useState('');
   const searches = data.jobs.filter(
@@ -772,7 +773,10 @@ export function Discover() {
                         selected={selected.includes(n.id)}
                         toggle={() => toggle(n.id)}
                         onDetail={() => setDetail(n)}
+                        cloneBusy={cloningId === n.id}
                         onClone={() => {
+                          if (cloningId) return;
+                          setCloningId(n.id);
                           void (async () => {
                             try {
                               const full =
@@ -786,6 +790,8 @@ export function Discover() {
                               clone(full);
                             } catch (e) {
                               notify((e as Error).message, true);
+                            } finally {
+                              setCloningId('');
                             }
                           })();
                         }}
@@ -949,6 +955,7 @@ export function NoteCard({
   onDetail,
   onClone,
   onCollect,
+  cloneBusy,
   priorityReason,
 }: {
   note: Note;
@@ -957,6 +964,7 @@ export function NoteCard({
   onDetail: () => void;
   onClone: () => void;
   onCollect: () => void;
+  cloneBusy?: boolean;
   priorityReason?: string;
 }) {
   return (
@@ -992,10 +1000,10 @@ export function NoteCard({
           <button
             className="btn primary small"
             onClick={onClone}
-            disabled={n.type === 'video' || !n.images.length}
+            disabled={cloneBusy || n.type === 'video' || !n.images.length}
           >
             <Copy size={13} />
-            {n.type === 'video' ? '仅支持图文克隆' : '一键克隆'}
+            {n.type === 'video' ? '仅支持图文克隆' : cloneBusy ? '准备中…' : '一键克隆'}
           </button>
           <button className="btn small" onClick={onCollect}>
             <Users size={13} />

@@ -4,7 +4,7 @@ import { z } from 'zod';
 import type { InboxThread, ReplyDraft, NativeInbox, InboxMessage } from '../shared/messages.ts';
 import type { Platform, Lead } from '../shared/types.ts';
 import type { SalesCase, SalesProfile } from '../shared/sales.ts';
-import { emptySalesProfile } from '../shared/sales.ts';
+import { emptySalesProfile, stopsContact } from '../shared/sales.ts';
 import { get, put, all, configGet } from './store.ts';
 import { browserCall } from './platforms/client.ts';
 import { transcriptHash, threadHash } from './message-hash.ts';
@@ -40,8 +40,7 @@ const stableId = (p: Platform, a: string, id: string) =>
     .digest('hex');
 export const isSystemGreeting = (m: InboxMessage) =>
   /^(我们已相互关注，开始聊天吧|我们已互相关注|你们已互相关注|你们已成为好友)/.test(m.text);
-const optedOut = (text: string) =>
-  /别再联系|不要再联系|别发了|不要发了|不需要.{0,5}联系/.test(text);
+const optedOut = stopsContact;
 function assertContact(t: InboxThread) {
   if (t.leadId && !get<Lead>('leads', t.leadId))
     throw new Error('关联原线索已删除，请解除关联后继续');
@@ -93,11 +92,7 @@ export function mergeNative(data: NativeInbox): InboxThread[] {
             !record.events.some((e) => e.id === `im:${id}:${m.nativeId}`),
         );
         if (additions.length) {
-          const optout = additions.some(
-            (m) =>
-              m.direction === 'incoming' &&
-              /别再联系|不要再联系|别发了|不要发了|不需要.{0,5}联系/.test(m.text),
-          );
+          const optout = additions.some((m) => m.direction === 'incoming' && stopsContact(m.text));
           put<SalesCase>('salesCases', {
             ...record,
             events: [
