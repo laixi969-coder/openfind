@@ -91,6 +91,10 @@ export interface Draft {
   kind?: 'image' | 'video';
   video?: string;
   origin?: 'original' | 'clone';
+  // 这篇草稿改写时引用了哪些方法卡，用于事后看卡片有没有带出东西。
+  knowledgeIds?: string[];
+  // 用户手动发布后回填的作品数据；系统不代发，只记录真实链接与互动数。
+  result?: DraftResult;
   id: string;
   noteId: string;
   title: string;
@@ -103,6 +107,17 @@ export interface Draft {
   receipt?: string;
   createdAt: string;
   updatedAt: string;
+}
+export interface DraftResult {
+  url: string;
+  platform: Platform;
+  noteId: string;
+  title: string;
+  likes: number;
+  comments: number;
+  saves: number;
+  publishedAt: string;
+  checkedAt: string;
 }
 export interface Log {
   at: string;
@@ -261,6 +276,7 @@ export interface CopyRewrite {
   model: string;
   elapsedMs: number;
   overlap: number;
+  knowledge?: { id: string; title: string; kind: InsightKind }[];
 }
 export interface ImageSettings {
   serviceId?: string;
@@ -346,4 +362,156 @@ export interface ProtectionView {
   policy: CollectionPolicy;
   resetAt: number;
   budgets: Record<'search' | 'comments', { remaining: number; availableAt: number | null }>;
+}
+
+// 知识卡：把业务经验沉淀成可被 AI 改写、评论归集复用的结构化条目。
+// 平台用 'all' 表示两个平台通用；小红书与抖音各自一套，互不覆盖。
+export type InsightKind =
+  'angle' | 'structure' | 'hook' | 'voice' | 'pain' | 'objection' | 'deal' | 'forbidden';
+export type InsightSource = 'manual' | 'breakdown' | 'comments' | 'deal';
+export interface InsightCard {
+  id: string;
+  platform: Platform | 'all';
+  kind: InsightKind;
+  title: string;
+  body: string;
+  tags: string[];
+  evidence: string[];
+  source: InsightSource;
+  sourceNoteId?: string;
+  enabled: boolean;
+  usedCount: number;
+  lastUsedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+// 拆解与归集的产出先作为候选返回，用户确认后才写进知识库。
+export interface InsightCandidate {
+  kind: InsightKind;
+  title: string;
+  body: string;
+  tags: string[];
+  evidence: string[];
+}
+export interface NoteBreakdown {
+  noteId: string;
+  platform: Platform;
+  model: string;
+  cards: InsightCandidate[];
+  dropped: number;
+  commentSamples: number;
+  elapsedMs: number;
+  // 相对同类作品的位置，以及评论区高频词；都是本机统计，可复核。
+  radar: RadarReport;
+  commentKeywords: { word: string; count: number }[];
+}
+export interface RadarDimension {
+  key: string;
+  label: string;
+  value: number;
+  text: string;
+  percentile: number;
+}
+export interface RadarReport {
+  noteId: string;
+  sample: { key: string; label: string; size: number };
+  dims: RadarDimension[];
+  note: string;
+}
+export interface AuthorWork {
+  id: string;
+  title: string;
+  likes: number;
+  comments: number;
+  saves: number;
+  publishedAt: string;
+}
+export interface AuthorBreakdown {
+  platform: Platform;
+  authorId: string;
+  author: string;
+  works: AuthorWork[];
+  cards: InsightCandidate[];
+  dropped: number;
+  model: string;
+  elapsedMs: number;
+}
+// 选题池：只从真实提问生成，标题与做法都是规则产出，不调模型、可复核。
+export interface TopicIdea {
+  id: string;
+  title: string;
+  angle: string;
+  intent: KeywordIntent;
+  count: number;
+  evidence: string;
+}
+export interface TopicPool {
+  platform: Platform;
+  seed: string;
+  corpusComments: number;
+  ideas: TopicIdea[];
+  note: string;
+}
+export interface CommentDigest {
+  platform: Platform;
+  commentCount: number;
+  noteCount: number;
+  model: string;
+  cards: InsightCandidate[];
+  dropped: number;
+  elapsedMs: number;
+}
+export type KeywordIntent = '价格' | '选品' | '避坑' | '教程' | '场景' | '通用';
+export interface KeywordSuggestion {
+  keyword: string;
+  intent: KeywordIntent;
+  origin: 'corpus' | 'model';
+  hits: number;
+  sample: string;
+}
+export interface KeywordDigest {
+  platform: Platform;
+  seed: string;
+  corpusComments: number;
+  suggestions: KeywordSuggestion[];
+  model?: string;
+}
+export interface AttributionRow {
+  keyword: string;
+  platform: Platform;
+  notes: number;
+  leads: number;
+  contacted: number;
+  won: number;
+  amount: number;
+}
+export interface KnowledgeAttribution {
+  rows: AttributionRow[];
+  totals: { notes: number; leads: number; won: number; amount: number };
+  note: string;
+}
+// 卡片 → 草稿 → 已回填作品的口径。互动数是作品级，同一作品用了多张卡时会在每张卡上各计一次。
+export interface CardOutcome {
+  cardId: string;
+  title: string;
+  platform: Platform | 'all';
+  kind: InsightKind;
+  drafts: number;
+  published: number;
+  likes: number;
+  comments: number;
+  saves: number;
+}
+export interface DraftOutcomes {
+  rows: CardOutcome[];
+  totals: {
+    cards: number;
+    drafts: number;
+    published: number;
+    likes: number;
+    comments: number;
+    saves: number;
+  };
+  unattributed: number;
+  note: string;
 }

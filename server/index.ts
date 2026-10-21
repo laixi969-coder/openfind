@@ -29,6 +29,20 @@ import {
 } from './images.ts';
 import { rewriteCopy, rewriteInputSchema } from './copy.ts';
 import {
+  adoptCandidates,
+  attribution,
+  authorBreakdown,
+  breakdownNote,
+  createInsight,
+  deleteInsight,
+  digestComments,
+  draftOutcomes,
+  listInsights,
+  suggestKeywords,
+  updateInsight,
+} from './insights.ts';
+import { buildTopicPool } from './topics.ts';
+import {
   addServiceModel,
   removeServiceModel,
   listServices,
@@ -79,6 +93,7 @@ import type {
   Comment,
   Lead,
   Draft,
+  DraftResult,
   Job,
   Settings,
   Account,
@@ -792,6 +807,7 @@ const draftSchema = z.object({
   origin: z.enum(['original', 'clone']).default('clone'),
   visibility: z.enum(['public', 'private']),
   accountId: z.string().min(1),
+  knowledgeIds: z.array(z.string().max(64)).max(12).default([]),
 });
 app.post('/api/drafts', async (req, res) => {
   const input = draftSchema.parse(req.body);
@@ -861,6 +877,55 @@ for (const action of ['publish', 'prepare', 'reconcile']) {
       .json({ error: '平台代发与代填已取消，请下载素材包、复制文案后自行到官方平台发布。' }),
   );
 }
+// 手动发布后回填作品链接：只记录真实数据，不代发、不推断结果。
+app.post('/api/drafts/:id/result', async (req, res) => {
+  const draft = get<Draft>('drafts', String(req.params.id));
+  if (!draft) {
+    res.status(404).json({ error: '草稿不存在或已删除' });
+    return;
+  }
+  const { url } = z.object({ url: z.string().trim().min(1).max(2000) }).parse(req.body);
+  if (!/^https?:\/\//.test(url)) {
+    res.status(400).json({ error: '请填写完整的作品链接（以 http 开头）' });
+    return;
+  }
+  const platform = draft.platform || 'xiaohongshu';
+  if (platform === 'douyin' && !douyinUsesApi()) {
+    res.status(400).json({
+      error: '抖音当前使用浏览器数据源，回填作品数据需要先在「抖音数据源」切换 TikHub / RedFox',
+    });
+    return;
+  }
+  let note: Note;
+  try {
+    note = await (platform === 'xiaohongshu' ? xhsClient() : douyinClient()).detail(url);
+  } catch (error) {
+    res.status(502).json({
+      error: '拉取作品数据失败：' + (error instanceof Error ? error.message : '数据源不可用'),
+    });
+    return;
+  }
+  const now = new Date().toISOString();
+  const result: DraftResult = {
+    url,
+    platform,
+    noteId: note.nativeId || note.id,
+    title: note.title,
+    likes: note.likes,
+    comments: note.comments,
+    saves: note.saves,
+    publishedAt: note.publishedAt,
+    checkedAt: now,
+  };
+  const next: Draft = {
+    ...draft,
+    result,
+    revision: (draft.revision || 0) + 1,
+    updatedAt: now,
+  };
+  put('drafts', next);
+  res.json(next);
+});
 const uploads = join(dataDir, 'uploads');
 mkdirSync(uploads, { recursive: true, mode: 0o700 });
 const upload = multer({
@@ -995,6 +1060,60 @@ app.post('/api/copy/rewrite', async (req, res) => {
     if (error instanceof z.ZodError) throw error;
     const message = error instanceof Error ? error.message : '文案改写失败';
     res.status(/敏感主题/.test(message) ? 400 : 502).json({ error: message });
+  }
+});
+// 知识库：卡片、拆解、评论归集、搜索词与归因。平台一律由调用方传入，小红书与抖音各自独立。
+app.get('/api/insights', (req, res) => {
+  res.json(
+    listInsights({
+      platform: typeof req.query.platform === 'string' ? req.query.platform : '',
+      kind: typeof req.query.kind === 'string' ? req.query.kind : '',
+    }),
+  );
+});
+app.get('/api/insights/attribution', (_req, res) => res.json(attribution()));
+app.get('/api/insights/outcomes', (_req, res) => res.json(draftOutcomes()));
+app.post('/api/insights', (req, res) => res.status(201).json(createInsight(req.body)));
+app.post('/api/insights/adopt', (req, res) => res.status(201).json(adoptCandidates(req.body)));
+app.patch('/api/insights/:id', (req, res) =>
+  res.json(updateInsight(String(req.params.id), req.body)),
+);
+app.delete('/api/insights/:id', (req, res) => {
+  deleteInsight(String(req.params.id));
+  res.json({ ok: true });
+});
+app.post('/api/insights/breakdown', async (req, res) => {
+  const { noteId } = z.object({ noteId: z.string().min(1) }).parse(req.body);
+  try {
+    res.json(await breakdownNote(noteId));
+  } catch (error) {
+    if (error instanceof z.ZodError) throw error;
+    res.status(502).json({ error: error instanceof Error ? error.message : '作品拆解失败' });
+  }
+});
+app.post('/api/insights/comments', async (req, res) => {
+  try {
+    res.json(await digestComments(req.body));
+  } catch (error) {
+    if (error instanceof z.ZodError) throw error;
+    res.status(502).json({ error: error instanceof Error ? error.message : '评论归集失败' });
+  }
+});
+app.post('/api/insights/author', async (req, res) => {
+  try {
+    res.json(await authorBreakdown(req.body));
+  } catch (error) {
+    if (error instanceof z.ZodError) throw error;
+    res.status(502).json({ error: error instanceof Error ? error.message : '账号分析失败' });
+  }
+});
+app.post('/api/topics', (req, res) => res.json(buildTopicPool(req.body)));
+app.post('/api/insights/keywords', async (req, res) => {
+  try {
+    res.json(await suggestKeywords(req.body));
+  } catch (error) {
+    if (error instanceof z.ZodError) throw error;
+    res.status(502).json({ error: error instanceof Error ? error.message : '搜索词挖掘失败' });
   }
 });
 app.get('/api/services', (req, res) => {

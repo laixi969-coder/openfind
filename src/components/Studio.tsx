@@ -21,7 +21,7 @@ import {
   ExternalLink,
 } from 'lucide-react';
 import type { Note, Draft, Platform } from '../../shared/types';
-import { api, safeUrl } from '../api';
+import { api, safeUrl, shortNum } from '../api';
 import { useWorkspace } from '../context';
 import { AccountForm } from './Accounts';
 import { AiImage } from './AiImage';
@@ -122,6 +122,7 @@ export function Studio() {
                   <p>
                     <Clock size={12} />
                     {new Date(d.updatedAt).toLocaleString('zh-CN')}
+                    {d.knowledgeIds?.length ? ` · 引用 ${d.knowledgeIds.length} 张方法卡` : ''}
                   </p>
                   <div className="draft-actions">
                     <button className="text-btn" onClick={() => editDraft(d)}>
@@ -139,6 +140,7 @@ export function Studio() {
                       <Trash2 size={14} />
                     </button>
                   </div>
+                  <DraftResultBox draft={d} />
                 </div>
               </article>
             ))}
@@ -170,16 +172,21 @@ export function Editor({
 }) {
   const { data, refresh, notify, navigate } = useWorkspace();
   const source = note || data.notes.find((n) => n.id === initial?.noteId);
+  // 从选题池「去创作」进来时带上标题；只在新建草稿时读，避免覆盖已有草稿。
+  const [handoff] = useState(() => (!initial && !note ? readHandoffDraft() : null));
   const [platform, setPlatform] = useState<Platform>(
     initial?.platform || source?.platform || data.settings.platform || 'xiaohongshu',
   );
   const [kind, setKind] = useState<'image' | 'video'>(initial?.kind || 'image');
   const [video, setVideo] = useState(initial?.video || '');
   const videoFile = useRef<HTMLInputElement>(null);
-  const [title, setTitle] = useState(initial?.title || note?.title.slice(0, 20) || ''),
+  const [title, setTitle] = useState(
+      initial?.title || note?.title.slice(0, 20) || handoff?.title?.slice(0, 20) || '',
+    ),
     [body, setBody] = useState(initial?.body ?? note?.body ?? ''),
     [tags, setTags] = useState((initial?.tags || note?.tags || []).join(' ')),
     [images, setImages] = useState<string[]>(initial?.images || note?.images || []),
+    [knowledgeIds, setKnowledgeIds] = useState<string[]>(initial?.knowledgeIds || []),
     [visibility, setVisibility] = useState<Draft['visibility']>(initial?.visibility || 'public'),
     [accountId, setAccountId] = useState(
       initial?.accountId ||
@@ -224,6 +231,7 @@ export function Editor({
       kind,
       video: kind === 'video' ? video : undefined,
       origin: source ? 'clone' : 'original',
+      knowledgeIds,
     });
     setSaved(d);
     if (editRevision.current === savingRevision) setImages(d.images);
@@ -479,6 +487,7 @@ export function Editor({
               if (patch.title !== undefined) setTitle(patch.title);
               if (patch.body !== undefined) setBody(patch.body);
               if (patch.tags !== undefined) setTags(patch.tags);
+              if (patch.knowledgeIds !== undefined) setKnowledgeIds(patch.knowledgeIds);
               changed();
             }}
           />
@@ -648,4 +657,75 @@ export function Editor({
       )}
     </Modal>
   );
+}
+
+// 手动发布后回填作品链接：系统不代发，只记录真实作品的互动数据，供知识库看卡片有没有带出东西。
+function DraftResultBox({ draft }: { draft: Draft }) {
+  const { notify, refresh } = useWorkspace();
+  const [url, setUrl] = useState('');
+  const [busy, setBusy] = useState(false);
+  const platform = draft.platform || 'xiaohongshu';
+  const result = draft.result;
+  async function record(link: string) {
+    setBusy(true);
+    try {
+      await api(`/drafts/${draft.id}/result`, { url: link });
+      await refresh();
+      setUrl('');
+      notify(result ? '作品数据已更新' : '已记录发布作品，可在知识库查看效果');
+    } catch (e) {
+      notify((e as Error).message, true);
+    } finally {
+      setBusy(false);
+    }
+  }
+  if (result)
+    return (
+      <div className="draft-result">
+        <span>
+          {shortNum(result.likes)} 赞 · {shortNum(result.comments)} 评论 · {shortNum(result.saves)}{' '}
+          收藏
+        </span>
+        <button
+          className="text-btn"
+          disabled={busy}
+          onClick={() => void record(result.url)}
+          title="重新拉取该作品的最新互动数据，会消耗一次数据源请求"
+        >
+          {busy ? '刷新中' : '刷新'}
+        </button>
+      </div>
+    );
+  return (
+    <form
+      className="draft-result-form"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (url.trim()) void record(url.trim());
+      }}
+    >
+      <input
+        aria-label={`为「${draft.title}」回填已发布作品链接`}
+        value={url}
+        maxLength={2000}
+        placeholder={platform === 'douyin' ? '发布后回填抖音作品链接' : '发布后回填小红书作品链接'}
+        onChange={(e) => setUrl(e.target.value)}
+      />
+      <button className="text-btn" disabled={busy || !url.trim()}>
+        {busy ? '记录中' : '记录'}
+      </button>
+    </form>
+  );
+}
+
+// 选题池交接：只传标题，读完即清，避免下次新建草稿又被覆盖。
+function readHandoffDraft() {
+  const raw = sessionStorage.getItem('openfind:handoff-draft');
+  if (!raw) return null;
+  sessionStorage.removeItem('openfind:handoff-draft');
+  try {
+    return JSON.parse(raw) as { title?: string };
+  } catch {
+    return null;
+  }
 }

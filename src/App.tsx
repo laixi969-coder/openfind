@@ -21,6 +21,7 @@ import {
   PanelLeftOpen,
   Workflow,
   Radio,
+  BookMarked,
 } from 'lucide-react';
 import type { Snapshot, Note, Draft, Job } from '../shared/types';
 import { api, getState } from './api';
@@ -29,6 +30,7 @@ import { Acquisition } from './components/Acquisition';
 import { Discover } from './components/Discover';
 import { Comments, Leads } from './components/Customers';
 import { Studio, Editor } from './components/Studio';
+import { Knowledge } from './components/Knowledge';
 import { SettingsPage, HistoryPage, Guide } from './components/System';
 const navs: { id: Page; name: string; icon: typeof Search }[] = [
   { id: 'acquisition', name: '一键获客', icon: Workflow },
@@ -37,6 +39,7 @@ const navs: { id: Page; name: string; icon: typeof Search }[] = [
   { id: 'leads', name: '客户线索', icon: Users },
   { id: 'inbox', name: '私信工作台', icon: MessageSquareText },
   { id: 'studio', name: '内容工作室', icon: PenLine },
+  { id: 'knowledge', name: '知识库', icon: BookMarked },
   { id: 'history', name: '任务记录', icon: History },
 ];
 function currentPage(): Page {
@@ -286,6 +289,7 @@ export default function App() {
             {page === 'leads' && <Leads />}
             {page === 'inbox' && <Inbox />}
             {page === 'studio' && <Studio />}
+            {page === 'knowledge' && <Knowledge />}
             {page === 'history' && <HistoryPage />}
             {page === 'settings' && <SettingsPage />}
             <footer className="workspace-footer">

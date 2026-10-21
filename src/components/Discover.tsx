@@ -77,6 +77,20 @@ export function Discover() {
     [cloningId, setCloningId] = useState(''),
     [jobId, setJobId] = useState(params.get('job') || ''),
     [planText, setPlanText] = useState('');
+  // 知识库「去搜索」交接：跳到发现页时把词与平台填好，用户仍需自己点搜索。
+  useEffect(() => {
+    const raw = sessionStorage.getItem('openfind:handoff-keyword');
+    if (!raw) return;
+    sessionStorage.removeItem('openfind:handoff-keyword');
+    try {
+      const handoff = JSON.parse(raw) as { keyword?: string; platform?: Platform };
+      if (handoff.keyword) setKeyword(handoff.keyword.slice(0, 100));
+      if (handoff.platform === 'douyin' || handoff.platform === 'xiaohongshu')
+        setPlatform(handoff.platform);
+    } catch {
+      // 交接数据损坏时忽略，保留手动输入
+    }
+  }, []);
   const searches = data.jobs.filter(
     (j) => j.type === 'search' && (j.platform || 'xiaohongshu') === platform,
   );

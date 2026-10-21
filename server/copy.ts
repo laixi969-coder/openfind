@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { CopyRewrite, Note } from '../shared/types.ts';
 import { intentScore } from './domain.ts';
+import { buildKnowledgeBlock, markInsightsUsed, retrieveInsights } from './insights.ts';
 import { completion, llmSettings } from './llm.ts';
 import { get } from './store.ts';
 
@@ -10,6 +11,8 @@ export const rewriteInputSchema = z
     serviceId: z.string().optional(),
     expectedModel: z.string().optional(),
     style: z.enum(['same', 'spoken', 'pro', 'hook']).default('same'),
+    // 关闭后按通用规则改写，用于对比知识库到底有没有帮忙。
+    useKnowledge: z.boolean().default(true),
   })
   .strict();
 
@@ -48,7 +51,20 @@ function similarity(source: string, next: string) {
 const clean = (value: string) => value.replace(/\s+/g, ' ').trim();
 const tag = (value: string) => clean(value).replace(/^#+/, '').slice(0, 15);
 
-export async function rewriteCopy(input: z.infer<typeof rewriteInputSchema>): Promise<CopyRewrite> {
+// 标题里没有空格，拆成 2 字片段才能和知识卡标签对上，例如「厨房」「小户」。
+function titleTokens(title: string) {
+  const runs = title.match(/[\u4e00-\u9fa5]{2,}/g) || [];
+  const tokens = new Set<string>();
+  for (const run of runs) {
+    tokens.add(run);
+    for (let i = 0; i < run.length - 1; i++) tokens.add(run.slice(i, i + 2));
+  }
+  return [...tokens].filter((t) => t.length >= 2);
+}
+
+export async function rewriteCopy(
+  input: Omit<z.infer<typeof rewriteInputSchema>, 'useKnowledge'> & { useKnowledge?: boolean },
+): Promise<CopyRewrite> {
   const settings = llmSettings();
   if (
     (input.serviceId && input.serviceId !== settings.serviceId) ||
@@ -65,6 +81,9 @@ export async function rewriteCopy(input: z.infer<typeof rewriteInputSchema>): Pr
     throw new Error('该作品涉及健康等敏感主题，不自动改写文案；如需使用请人工处理');
 
   const started = Date.now();
+  const lookupTags = [...note.tags, ...titleTokens(note.title)];
+  const cards = input.useKnowledge === false ? [] : retrieveInsights(note.platform, lookupTags, 6);
+  const knowledge = buildKnowledgeBlock(cards);
   const raw = await completion([
     {
       role: 'system',
@@ -77,6 +96,7 @@ export async function rewriteCopy(input: z.infer<typeof rewriteInputSchema>): Pr
         '3. 不使用“最”“第一”“唯一”“保证”“永久”等绝对化用语，不写联系方式；',
         '4. 不提及原作者、原品牌或“同款链接”；',
         '5. 保留可核实的客观信息，宁可少写也不要猜。',
+        ...(knowledge ? [knowledge] : []),
         '只输出 JSON，不要解释：',
         '{"titles":["≤20字，3个，钩子类型各不相同（结果前置/反常识/痛点提问）"],"hooks":["≤30字，3条正文开头第一句"],"body":"≤600字，第一行是钩子，分段，结尾一个不强迫的互动提问","tags":["6-8个话题词，不带#"],"avoid":["本次刻意规避的表述"]}',
       ].join('\n'),
@@ -105,6 +125,8 @@ export async function rewriteCopy(input: z.infer<typeof rewriteInputSchema>): Pr
   const body = parsed.data.body.trim().slice(0, 1000);
   if (!titles.length || !body) throw new Error('模型返回的标题或正文为空，请重试');
   const tags = [...new Set(parsed.data.tags.map(tag))].filter(Boolean).slice(0, 8);
+  const used = cards.map((c) => ({ id: c.id, title: c.title, kind: c.kind }));
+  if (used.length) markInsightsUsed(used.map((c) => c.id));
   return {
     titles,
     hooks,
@@ -114,5 +136,6 @@ export async function rewriteCopy(input: z.infer<typeof rewriteInputSchema>): Pr
     model: settings.model,
     elapsedMs: Date.now() - started,
     overlap: similarity(note.body, body),
+    knowledge: used,
   };
 }

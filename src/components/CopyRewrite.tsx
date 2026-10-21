@@ -19,11 +19,17 @@ export function CopyRewrite({
 }: {
   note?: Note;
   current: { title: string; body: string; tags: string };
-  onApply: (patch: { title?: string; body?: string; tags?: string }) => void;
+  onApply: (patch: {
+    title?: string;
+    body?: string;
+    tags?: string;
+    knowledgeIds?: string[];
+  }) => void;
   notify: (text: string, error?: boolean) => void;
 }) {
   const [llm, setLlm] = useState<LlmSettings | null>(null);
   const [style, setStyle] = useState<(typeof STYLES)[number][0]>('same');
+  const [useKnowledge, setUseKnowledge] = useState(true);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<Copy | null>(null);
   const [error, setError] = useState('');
@@ -49,12 +55,14 @@ export function CopyRewrite({
       const r = await api<Copy>('/copy/rewrite', {
         noteId: note.id,
         style,
+        useKnowledge,
         serviceId: llm?.serviceId,
         expectedModel: llm?.model,
       });
       setResult(r);
       notify(
-        `已生成 ${r.titles.length} 个标题与正文，与原作重复度 ${Math.round(r.overlap * 100)}%`,
+        `已生成 ${r.titles.length} 个标题与正文，与原作重复度 ${Math.round(r.overlap * 100)}%` +
+          (r.knowledge?.length ? `，引用了 ${r.knowledge.length} 张方法卡` : ''),
       );
     } catch (e) {
       setError((e as Error).message);
@@ -63,10 +71,16 @@ export function CopyRewrite({
     }
   }
 
+  // 套用改写结果时把本次引用的卡片带上，草稿才能记下用过哪些方法卡。
+  function apply(patch: { title?: string; body?: string; tags?: string; knowledgeIds?: string[] }) {
+    const ids = result?.knowledge?.map((k) => k.id);
+    onApply(ids?.length ? { ...patch, knowledgeIds: ids } : patch);
+  }
+
   function useHook(hook: string) {
     const lines = current.body.split('\n');
     lines[0] = hook;
-    onApply({ body: lines.join('\n') });
+    apply({ body: lines.join('\n') });
   }
 
   return (
@@ -106,6 +120,17 @@ export function CopyRewrite({
           <button className="btn small primary" disabled={busy} onClick={() => void rewrite()}>
             {busy ? <Busy text="改写中" /> : 'AI 改写'}
           </button>
+          <label
+            className="checkbox-line knowledge-switch"
+            title="关闭后按通用规则改写，用来对比方法卡有没有用"
+          >
+            <input
+              type="checkbox"
+              checked={useKnowledge}
+              onChange={(e) => setUseKnowledge(e.target.checked)}
+            />
+            用我的方法卡
+          </label>
           <span className="field-hint">{llm?.model}</span>
         </div>
       )}
@@ -123,7 +148,7 @@ export function CopyRewrite({
                 <button
                   key={t}
                   className={t === current.title ? 'active' : ''}
-                  onClick={() => onApply({ title: t })}
+                  onClick={() => apply({ title: t })}
                 >
                   {t}
                 </button>
@@ -144,7 +169,7 @@ export function CopyRewrite({
           )}
           <div className="copy-body">
             <p>{result.body}</p>
-            <button className="text-btn" onClick={() => onApply({ body: result.body })}>
+            <button className="text-btn" onClick={() => apply({ body: result.body })}>
               应用正文
             </button>
           </div>
@@ -153,7 +178,7 @@ export function CopyRewrite({
             {result.tags.map((t) => (
               <b key={t}>#{t}</b>
             ))}
-            <button className="text-btn" onClick={() => onApply({ tags: result.tags.join(' ') })}>
+            <button className="text-btn" onClick={() => apply({ tags: result.tags.join(' ') })}>
               应用话题
             </button>
           </div>
@@ -165,7 +190,7 @@ export function CopyRewrite({
             <button
               className="btn small primary"
               onClick={() =>
-                onApply({
+                apply({
                   title: result.titles[0],
                   body: result.body,
                   tags: result.tags.join(' '),
@@ -177,6 +202,17 @@ export function CopyRewrite({
           </footer>
           {result.avoid.length > 0 && (
             <p className="field-hint">本次刻意规避：{result.avoid.join('、')}</p>
+          )}
+          {result.knowledge?.length ? (
+            <p className="field-hint">
+              本次引用方法卡：{result.knowledge.map((k) => k.title).join('、')}
+            </p>
+          ) : useKnowledge ? (
+            <p className="field-hint">
+              这次没有匹配到方法卡。去「知识库」按标签补几张，下次改写就会带上。
+            </p>
+          ) : (
+            <p className="field-hint">本次关闭了方法卡，按通用规则改写。</p>
           )}
         </div>
       )}
