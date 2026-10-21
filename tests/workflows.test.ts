@@ -223,6 +223,7 @@ test('Exhausted network quota still permits eligible local cache without extendi
   const timestamp = new Date(Date.now() - 60000).toISOString();
   put('jobs', {
     id: 'cached-search',
+    dataProvider: (await import('../server/douyin-data.ts')).douyinFingerprint(),
     type: 'search',
     status: 'completed',
     source: 'live',

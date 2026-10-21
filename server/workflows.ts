@@ -1,3 +1,4 @@
+import { douyinUsesApi, requireDouyinComments } from './douyin-data.ts';
 import { workflowErrorMessage } from './workflow-errors.ts';
 import { reviewSemantics, semanticFor, llmSettings } from './llm.ts';
 import { compareQualifications } from './qualification-comparison.ts';
@@ -234,7 +235,7 @@ async function waitForPlatform(
   action: 'search' | 'comments',
   signal: AbortSignal,
 ) {
-  if (w.input.mode === 'demo' || w.input.platform === 'xiaohongshu') return;
+  if (w.input.mode === 'demo' || w.input.platform === 'xiaohongshu' || douyinUsesApi()) return;
   const state = protectionStatus(w.input.platform);
   // Evaluate non-timing guards first. Waiting never clears a platform pause or a quota.
   const error = evaluateBudget({ ...state, lastReadAt: undefined }, action);
@@ -324,6 +325,7 @@ export async function runWorkflow(
     saveWorkflow(w);
   }
   try {
+    requireDouyinComments(w.input.platform, w.input.mode);
     if (w.stage === 'resolve') {
       if (!resolve || !w.input.links?.length)
         throw new Error('链接读取服务不可用，请检查内置浏览器连接');
@@ -372,7 +374,7 @@ export async function runWorkflow(
         if (w.searchIndex > 0) {
           if (!w.input.supplement || rankedNotes(w).length >= w.input.maxNotes) break;
           const guard =
-            w.input.mode === 'live' && w.input.platform !== 'xiaohongshu'
+            w.input.mode === 'live' && w.input.platform !== 'xiaohongshu' && !douyinUsesApi()
               ? protectionStatus(w.input.platform)
               : null;
           if (guard) {

@@ -1,3 +1,12 @@
+import {
+  douyinClient,
+  douyinProvider,
+  douyinUsesApi,
+  douyinSettings,
+  saveDouyinSettings,
+  douyinFingerprint,
+  redfoxCommentNotice,
+} from './douyin-data.ts';
 import { xhsClient, xhsSettings, saveXhsSettings, XhsPendingError } from './xhs-data.ts';
 import { acquisitionLimits } from '../shared/collection-limits.ts';
 import inboxRouter from './inbox.ts';
@@ -186,9 +195,15 @@ async function runJob(job: Job, input: z.infer<typeof searchSchema>, parentSigna
   if (parentSignal?.aborted) abort.abort();
   running.set(job.id, abort);
   const started = Date.now();
-  const xhs =
-    job.source === 'live' && input.platform === 'xiaohongshu' ? xhsClient(abort.signal) : null;
-  if (xhs) job.dataProvider = xhs.fingerprint;
+  const collector =
+    job.source !== 'live'
+      ? null
+      : input.platform === 'xiaohongshu'
+        ? xhsClient(abort.signal)
+        : douyinUsesApi()
+          ? douyinClient(abort.signal)
+          : null;
+  if (job.source === 'live') job.dataProvider = collector?.fingerprint || douyinFingerprint();
   let cursor: string | null = null;
   let readId: string | null = null;
   const seen = new Set<string>();
@@ -248,7 +263,7 @@ async function runJob(job: Job, input: z.infer<typeof searchSchema>, parentSigna
         if (page)
           await delay(
             Math.max(
-              xhs ? 1000 : readInterval(protectionStatus(input.platform), job.type),
+              collector ? 1000 : readInterval(protectionStatus(input.platform), job.type),
               input.interval,
             ),
             undefined,
@@ -256,17 +271,17 @@ async function runJob(job: Job, input: z.infer<typeof searchSchema>, parentSigna
               signal: abort.signal,
             },
           );
-        if (!xhs) reservePlatformAction(input.platform, job.type);
+        if (!collector) reservePlatformAction(input.platform, job.type);
         const result: {
           items: (Omit<Note, 'source'> | Omit<Comment, 'source'>)[];
           nextCursor: string | null;
           readId?: string;
           evidence?: { path: string; filterSelected: string | null; sortType: string | null };
-        } = xhs
+        } = collector
           ? job.type === 'search'
-            ? await xhs.search(input, cursor)
-            : await xhs.comments(get<Note>('notes', job.noteId!)!, input.limit, cursor)
-          : settings().connectionType === 'browser'
+            ? await collector.search(input, cursor)
+            : await collector.comments(get<Note>('notes', job.noteId!)!, input.limit, cursor)
+          : douyinProvider() === 'browser'
             ? await browserCall<{ items: (Note | Comment)[]; nextCursor: string | null }>(
                 job.type === 'search' ? '/search' : '/comments',
                 job.type === 'search'
@@ -304,7 +319,7 @@ async function runJob(job: Job, input: z.infer<typeof searchSchema>, parentSigna
               `已核对平台排序：${input.sort === 'latest' ? '最新发布' : input.sort === 'popular' ? '最多点赞' : '综合'}，响应 ${result.evidence.path}`,
             );
         }
-        if (!xhs) recordPlatformSuccess(input.platform);
+        if (!collector) recordPlatformSuccess(input.platform);
         items = result.items.map((x) => ({ ...x, source: 'live' })) as (Note | Comment)[];
         const next: string | null = result.nextCursor;
         if (next && next === cursor)
@@ -350,16 +365,16 @@ async function runJob(job: Job, input: z.infer<typeof searchSchema>, parentSigna
     } else {
       job.status = e instanceof XhsPendingError ? 'stopped' : 'failed';
       job.error = e instanceof Error ? e.message : '任务失败';
-      if (job.source === 'live' && !xhs && !(e instanceof ProtectionError))
+      if (job.source === 'live' && !collector && !(e instanceof ProtectionError))
         recordPlatformFailure(input.platform, job.error);
       log(job, e instanceof XhsPendingError ? 'WARN' : 'ERROR', job.error);
     }
   } finally {
-    if (xhs)
+    if (collector)
       log(
         job,
         'INFO',
-        `数据源 ${xhs.provider}，本次 API 请求 ${xhs.requests} 次；计费以供应商账单为准`,
+        `数据源 ${collector.provider}，本次 API 请求 ${collector.requests} 次；计费以供应商账单为准`,
       );
     if (readId) await browserCall('/close-read', { cursor: readId }).catch(() => {});
     job.elapsed = Math.round((Date.now() - started) / 1000);
@@ -409,6 +424,7 @@ async function resolveWorkflowWork(
   signal: AbortSignal,
 ) {
   if (platform === 'xiaohongshu') return xhsClient(signal).detail(url);
+  if (douyinUsesApi()) return douyinClient(signal).detail(url);
   reservePlatformAction(platform, 'search');
   try {
     const note = await browserCall<Note>('/resolve-work', { url, platform }, signal);
@@ -439,10 +455,11 @@ app.post('/api/workflows/links', (req, res) => {
     res.status(409).json({ error: '已有任务运行，请先暂停或等待完成' });
     return;
   }
-  if (links.some((l) => l.platform === 'douyin') && settings().connectionType !== 'browser') {
+  if (links.some((l) => l.platform === 'douyin') && douyinProvider() === 'http') {
     res.status(400).json({ error: '链接获客需要内置平台浏览器，请在连接设置切换连接方式' });
     return;
   }
+  if (rejectCommentSource(res, links[0].platform, 'live')) return;
   const w = createWorkflow({
     keyword: `指定链接（${links.length}篇）`,
     links: links.map((l) => l.url),
@@ -468,6 +485,7 @@ app.post('/api/workflows', (req, res) => {
       .json({ error: '此关键词涉及敏感主题，请使用发现作品进行内容研究，不执行个人营销线索流程' });
     return;
   }
+  if (rejectCommentSource(res, input.platform, input.mode)) return;
   const w = createWorkflow(input);
   void runWorkflow(w, runJob);
   res.status(201).json(w);
@@ -514,6 +532,7 @@ app.post('/api/workflows/:id/:action', (req, res) => {
       res.status(409).json({ error: '请等待当前任务结束；只有暂停的流程可以继续' });
       return;
     }
+    if (rejectCommentSource(res, w.input.platform, w.input.mode)) return;
     void runWorkflow(w, runJob, resolveWorkflowWork);
   } else {
     res.status(404).json({ error: '未知操作' });
@@ -538,7 +557,7 @@ app.post('/api/jobs', (req, res) => {
   if (
     input.mode === 'live' &&
     input.platform !== 'xiaohongshu' &&
-    settings().connectionType === 'http' &&
+    douyinProvider() === 'http' &&
     !configGet('providerUrl')
   ) {
     res.status(400).json({ error: '尚未配置真实数据服务，请在连接设置中完成配置' });
@@ -587,6 +606,7 @@ app.post('/api/comments/collect', (req, res) => {
     res.status(404).json({ error: '作品不存在' });
     return;
   }
+  if (rejectCommentSource(res, note.platform, note.source)) return;
   if (note.source === 'live' && (input.limit === 0 || input.limit > 100)) {
     res.status(400).json({ error: '真实评论采集每次请选择 1–100 条' });
     return;
@@ -803,6 +823,45 @@ app.put('/api/llm', (req, res) => {
 });
 app.post('/api/llm/models/sync', async (_req, res) => res.json(await syncModels()));
 app.post('/api/llm/test', async (_req, res) => res.json(await testLlm()));
+function rejectCommentSource(res: express.Response, platform: string | undefined, mode: string) {
+  if (platform !== 'douyin' || mode !== 'live' || douyinProvider() !== 'redfox') return false;
+  res.status(400).json({ error: redfoxCommentNotice });
+  return true;
+}
+app.get('/api/douyin-data', (_req, res) => res.json(douyinSettings()));
+app.put('/api/douyin-data', (req, res) => {
+  if (active()) {
+    res.status(409).json({ error: '请先停止当前任务，再切换数据源或密钥' });
+    return;
+  }
+  res.json(saveDouyinSettings(req.body));
+});
+app.post('/api/douyin-data/test', async (req, res) => {
+  const { keyword } = z.object({ keyword: z.string().trim().min(1).max(100) }).parse(req.body);
+  if (!douyinUsesApi()) {
+    res.status(400).json({ error: '浏览器模式请使用下方登录检查；高级 HTTP 请使用原连接测试' });
+    return;
+  }
+  const client = douyinClient();
+  const result = await client.search(
+    {
+      keyword,
+      limit: 1,
+      sort: 'general',
+      noteType: 'all',
+      interval: 1000,
+      mode: 'live',
+      platform: 'douyin',
+    },
+    null,
+  );
+  res.json({
+    ok: true,
+    count: result.items.length,
+    requests: client.requests,
+    provider: client.provider,
+  });
+});
 app.get('/api/xhs-data', (_req, res) => res.json(xhsSettings()));
 app.put('/api/xhs-data', (req, res) => {
   if (active()) {
@@ -949,12 +1008,12 @@ app.delete('/api/accounts/:id', (req, res) => {
   res.json({ ok: true });
 });
 app.post('/api/settings/test', async (_req, res) => {
-  if (settings().platform === 'xiaohongshu') {
-    res.status(400).json({ error: '请使用小红书 API 数据源面板中的测试按钮' });
+  if (douyinUsesApi()) {
+    res.status(400).json({ error: '请使用抖音数据源面板中的测试按钮' });
     return;
   }
-  if (settings().connectionType === 'browser') {
-    const c = await browserCall<{ status: string }>('/status', { platform: settings().platform });
+  if (douyinProvider() === 'browser') {
+    const c = await browserCall<{ status: string }>('/status', { platform: 'douyin' });
     res.json({ ok: c.status === 'ready', ...c });
     return;
   }
@@ -988,7 +1047,7 @@ app.put('/api/protection/:platform', (req, res) => {
 });
 app.post('/api/platforms/:platform/resume', async (req, res) => {
   const platform = platformEnum.parse(req.params.platform);
-  if (platform !== 'xiaohongshu' && settings().connectionType === 'browser') {
+  if (platform !== 'xiaohongshu' && douyinProvider() === 'browser') {
     const state = await browserCall<{
       state: { status: string };
       pages: { text: string; frames: { text: string; visible?: boolean }[] }[];
@@ -1051,13 +1110,13 @@ app.post('/api/notes/:id/detail', async (req, res) => {
     res.status(404).json({ error: '作品不存在' });
     return;
   }
-  if (n.source === 'live' && n.platform === 'xiaohongshu') {
-    const detail = await xhsClient().detail(n);
+  if (n.source === 'live' && (n.platform === 'xiaohongshu' || douyinUsesApi())) {
+    const detail = await (n.platform === 'xiaohongshu' ? xhsClient() : douyinClient()).detail(n);
     put('notes', detail);
     res.json(detail);
     return;
   }
-  if (n.source === 'demo' || settings().connectionType === 'http') {
+  if (n.source === 'demo' || douyinProvider() === 'http') {
     res.json(n);
     return;
   }

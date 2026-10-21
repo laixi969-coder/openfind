@@ -1,3 +1,4 @@
+import { DouyinDataSettings } from './DouyinDataSettings';
 import { XhsDataSettings } from './XhsDataSettings';
 import { LlmSettingsPanel } from './LlmSettings';
 import { useState } from 'react';
@@ -104,6 +105,7 @@ export function SettingsPage() {
         description="管理平台账号与数据服务，所有配置和凭证均保存在你的本机。"
       />
       <XhsDataSettings />
+      <DouyinDataSettings />
       <PlatformConnections />
       <LlmSettingsPanel />
       <div className="settings-layout">
@@ -133,23 +135,13 @@ export function SettingsPage() {
                 <Globe size={17} />
                 真实模式
               </span>
-              <p>小红书使用 API，抖音使用现有连接</p>
+              <p>小红书使用 API，抖音使用独立选择的数据源</p>
               {form.mode === 'live' && <Check size={15} />}
             </button>
           </div>
-          <label className="field-label" htmlFor="connection-type">
-            抖音连接方式
-          </label>
-          <select
-            id="connection-type"
-            value={form.connectionType || 'browser'}
-            onChange={(e) =>
-              setForm({ ...form, connectionType: e.target.value as 'browser' | 'http' })
-            }
-          >
-            <option value="browser">内置官方浏览器（直接连接）</option>
-            <option value="http">外部 HTTP 服务（高级）</option>
-          </select>
+          <p className="field-hint">
+            抖音采集方式请在上方「抖音数据源」选择；以下地址与令牌仅用于原有高级 HTTP 适配器。
+          </p>
           <label className="field-label" htmlFor="provider-url">
             数据服务地址
           </label>
@@ -383,7 +375,8 @@ export function SettingsPage() {
             <h3>接入真实数据</h3>
             <p>
               小红书使用 TikHub / RedFox API，无需扫码或
-              Cookie；抖音沿用内置浏览器或现有数据服务。发送与发布由用户自行完成。
+              Cookie；抖音可独立选择浏览器、TikHub、RedFox 或原有高级 HTTP
+              适配器。发送与发布由用户自行完成。
             </p>
             <p className="field-hint">适配器完整字段及调用示例已随项目提供：docs/ADAPTER.md</p>
             <button
