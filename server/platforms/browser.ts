@@ -1,3 +1,4 @@
+import { hasVisibleChallenge } from './challenge.ts';
 import { browserLaunchOptions } from './launch-options.ts';
 import { openDouyinComments } from './comment-panel.ts';
 import { chromium, type BrowserContext, type Page, type Response } from 'playwright';
@@ -73,7 +74,7 @@ export function connection(platform: Platform): PlatformConnection {
   );
 }
 function verified(s: Session, id: string, name: string) {
-  if (!id) return;
+  if (!id || s.state.status === 'challenge') return;
   s.state = {
     ...s.state,
     status: 'ready',
@@ -201,6 +202,18 @@ export async function checkLogin(platform: Platform) {
   if (!s || s.page.isClosed()) return connection(platform);
   try {
     const p = s.page;
+    // A verified identity does not imply the platform currently permits access.
+    if (await hasVisibleChallenge(p)) {
+      s.state = {
+        ...s.state,
+        status: 'challenge',
+        message: '平台要求本人完成安全验证，已暂停自动读取',
+        url: p.url(),
+        checkedAt: new Date().toISOString(),
+      };
+      return s.state;
+    }
+    if (s.state.status === 'challenge') s.state = { ...s.state, status: 'awaiting_login' };
     // Only inspect user identity already exposed to the logged-in page. Cookie existence is not proof.
     const identity = await p.evaluate((which) => {
       if (which === 'xiaohongshu') {
@@ -235,24 +248,24 @@ export async function checkLogin(platform: Platform) {
       return s.state;
     }
     if (s.state.status !== 'ready') {
-      const captcha = await p
-        .locator(
-          'iframe[src*="captcha"], [id*="captcha"][style*="block"], .captcha_verify_container',
-        )
-        .first()
-        .isVisible()
-        .catch(() => false);
       // Identity may be verified by a response while the DOM check is awaiting.
       if (connection(platform).status === 'ready') return connection(platform);
       s.state = {
         ...s.state,
-        status: captcha ? 'challenge' : 'awaiting_login',
-        message: captcha ? '平台要求本人完成安全验证，请在浏览器中处理' : '等待你完成扫码登录',
+        status: 'awaiting_login',
+        message: '等待你完成扫码登录',
         url: p.url(),
         checkedAt: new Date().toISOString(),
       };
     }
-  } catch {}
+  } catch {
+    s.state = {
+      ...s.state,
+      status: 'error',
+      message: '无法核实当前平台状态，已暂停自动读取；请检查平台窗口后再继续',
+      checkedAt: new Date().toISOString(),
+    };
+  }
   return s.state;
 }
 export async function loginScreenshot(platform: Platform) {
@@ -270,7 +283,11 @@ export async function requireSession(platform: Platform) {
       : openLogin(platform)));
   for (let i = 0; i < 60; i++) {
     await checkLogin(platform);
-    if (s.state.status === 'ready' || !configGet('browserAccount:' + platform)) break;
+    if (
+      ['ready', 'challenge', 'error'].includes(s.state.status) ||
+      !configGet('browserAccount:' + platform)
+    )
+      break;
     await delay(500);
   }
   if (s.state.status !== 'ready')
