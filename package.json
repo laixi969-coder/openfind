@@ -15,7 +15,9 @@
     "typecheck": "tsc -b",
     "format": "prettier --write src server shared tests *.ts *.json index.html docs/*.md README.md",
     "format:check": "prettier --check src server shared tests *.ts *.json index.html docs/*.md README.md",
-    "browser": "tsx server/browser-service.ts"
+    "browser": "tsx server/browser-service.ts",
+    "data:backup": "tsx server/data-backup.ts backup",
+    "data:restore": "tsx server/data-backup.ts restore"
   },
   "dependencies": {
     "express": "^5.1.0",

@@ -1,7 +1,17 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { ModelOption, ModelService } from '../shared/types.ts';
-import { all, configGet, configSet, decrypt, encrypt, get, put, remove } from './store.ts';
+import {
+  all,
+  configGet,
+  configSet,
+  decrypt,
+  encrypt,
+  get,
+  put,
+  remove,
+  transaction,
+} from './store.ts';
 
 export type ServiceKind = 'text' | 'image';
 
@@ -249,46 +259,61 @@ function nameFromUrl(baseUrl: string) {
 
 // 把历史的单服务配置迁移成一条服务记录，避免升级后配置丢失。
 export function migrateServices() {
-  if (all('model-services').length) return;
-  const now = new Date().toISOString();
-  const textBase = configGet('llm:baseUrl');
-  const textKey = configGet('llm:key');
-  if (textBase || textKey) {
-    const service: StoredService = {
-      id: 'service-text-default',
-      kind: 'text',
-      name: nameFromUrl(textBase),
-      baseUrl: textBase,
-      key: textKey,
-      model: configGet('llm:model'),
-      synced: list(configGet('llm:models')),
-      custom: list(configGet('llm:customModels')).map((m) => ({ ...m, custom: true })),
-      modelsSyncedAt: configGet('llm:modelsSyncedAt') || undefined,
-      testedAt: configGet('llm:testedAt') || undefined,
-      createdAt: now,
-    };
-    write(service);
-    configSet('llm:serviceId', service.id);
-  }
-  const imageBase = configGet('image:baseUrl');
-  const imageKey = configGet('image:key');
-  if (imageBase || imageKey) {
-    const service: StoredService = {
-      id: 'service-image-default',
-      kind: 'image',
-      name: nameFromUrl(imageBase),
-      baseUrl: imageBase,
-      key: imageKey,
-      model: configGet('image:model'),
-      synced: list(configGet('image:models')),
-      custom: list(configGet('image:customModels')).map((m) => ({ ...m, custom: true })),
-      modelsSyncedAt: configGet('image:modelsSyncedAt') || undefined,
-      testedAt: configGet('image:testedAt') || undefined,
-      createdAt: now,
-    };
-    write(service);
-    configSet('image:serviceId', service.id);
-  }
+  transaction(() => {
+    const services = all<StoredService>('model-services');
+    for (const kind of ['text', 'image']) {
+      if (services.some((s) => s.kind === kind)) configSet('migration:services:' + kind, '1');
+    }
+    const now = new Date().toISOString();
+    const textBase = configGet('llm:baseUrl');
+    const textKey = configGet('llm:key');
+    if (
+      !configGet('migration:services:text') &&
+      !services.some((s) => s.kind === 'text') &&
+      (textBase || textKey)
+    ) {
+      const service: StoredService = {
+        id: 'service-text-default',
+        kind: 'text',
+        name: nameFromUrl(textBase),
+        baseUrl: textBase,
+        key: textKey,
+        model: configGet('llm:model'),
+        synced: list(configGet('llm:models')),
+        custom: list(configGet('llm:customModels')).map((m) => ({ ...m, custom: true })),
+        modelsSyncedAt: configGet('llm:modelsSyncedAt') || undefined,
+        testedAt: configGet('llm:testedAt') || undefined,
+        createdAt: now,
+      };
+      write(service);
+      configSet('llm:serviceId', service.id);
+      configSet('migration:services:text', '1');
+    }
+    const imageBase = configGet('image:baseUrl');
+    const imageKey = configGet('image:key');
+    if (
+      !configGet('migration:services:image') &&
+      !services.some((s) => s.kind === 'image') &&
+      (imageBase || imageKey)
+    ) {
+      const service: StoredService = {
+        id: 'service-image-default',
+        kind: 'image',
+        name: nameFromUrl(imageBase),
+        baseUrl: imageBase,
+        key: imageKey,
+        model: configGet('image:model'),
+        synced: list(configGet('image:models')),
+        custom: list(configGet('image:customModels')).map((m) => ({ ...m, custom: true })),
+        modelsSyncedAt: configGet('image:modelsSyncedAt') || undefined,
+        testedAt: configGet('image:testedAt') || undefined,
+        createdAt: now,
+      };
+      write(service);
+      configSet('image:serviceId', service.id);
+      configSet('migration:services:image', '1');
+    }
+  });
 }
 
 function list(value: string): ModelOption[] {
