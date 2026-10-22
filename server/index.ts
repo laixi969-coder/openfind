@@ -57,7 +57,11 @@ import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import multer from 'multer';
 import { dataDir } from './store.ts';
-import { captureRequestReceipts, type ReceiptRef } from './request-journal.ts';
+import {
+  captureRequestReceipts,
+  assertDispatchAllowed,
+  type ReceiptRef,
+} from './request-journal.ts';
 import {
   commitJobPage,
   validateJobCheckpoint,
@@ -87,6 +91,7 @@ import {
 } from './protection.ts';
 import {
   createWorkflow,
+  saveWorkflow,
   runWorkflow,
   recoverWorkflows,
   workflowRuns,
@@ -356,8 +361,10 @@ export async function runJob(
               signal: abort.signal,
             },
           );
-        if (!collector && douyinProvider() === 'browser')
+        if (!collector && douyinProvider() === 'browser') {
+          assertDispatchAllowed(job.id);
           reservePlatformAction(input.platform, job.type);
+        }
         const captured: {
           result: {
             items: (Omit<Note, 'source'> | Omit<Comment, 'source'>)[];
@@ -527,6 +534,7 @@ async function resolveWorkflowWork(
 ) {
   if (platform === 'xiaohongshu') return xhsClient(signal, fetch, requestScope).detail(url);
   if (douyinUsesApi()) return douyinClient(signal, fetch, requestScope).detail(url);
+  assertDispatchAllowed(requestScope);
   reservePlatformAction(platform, 'search');
   try {
     const note = await browserCall<Note>('/resolve-work', { url, platform }, signal);
@@ -610,7 +618,7 @@ app.post('/api/workflows/:id/review', async (req, res) => {
   try {
     await reviewWorkflowQualification(w, undefined, useModel);
     w.message = `复核完成：${w.commentIds.length}条原始评论，${w.leadIds.length}条候选；原候选降级${w.qualificationReview!.removedCommentIds.length}条，补入${w.qualificationReview!.addedCommentIds.length}条`;
-    put('workflows', w);
+    saveWorkflow(w);
     res.json(w);
   } finally {
     qualificationRuns.delete(w.id);

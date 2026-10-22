@@ -5,7 +5,7 @@ import {
   type ReceiptRef,
 } from './request-journal.ts';
 import type { Job, Note, Comment, SearchInput } from '../shared/types.ts';
-import { get, put, transaction } from './store.ts';
+import { get, put, transaction, afterCommit } from './store.ts';
 
 export class ConcurrentJobUpdateError extends Error {
   constructor() {
@@ -100,7 +100,7 @@ export function commitJobPage(
     put('job-pages', { id: job.id + ':' + next.pages, digest: checkpointDigest(next), receipts });
     return next;
   });
-  Object.assign(job, next);
+  afterCommit(() => Object.assign(job, next));
 }
 
 export function validateJobCheckpoint(job: Job) {

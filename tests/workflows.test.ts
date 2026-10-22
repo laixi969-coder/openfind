@@ -670,3 +670,56 @@ test('a competing workflow revision cannot rewind stages or launch a new paid ch
     'finished-note',
   ]);
 });
+
+test('rolled-back nested workflow saves cannot acquire the revision of a competing update', async () => {
+  const { transaction } = await import('../server/store.ts');
+  const { saveWorkflow, ConcurrentWorkflowUpdateError } = await import('../server/workflows.ts');
+  const w = createWorkflow(input);
+  const revision = w.revision;
+  assert.throws(
+    () =>
+      transaction(() => {
+        saveWorkflow(w, 'rolled back');
+        throw Error('rollback');
+      }),
+    /rollback/,
+  );
+  assert.equal(w.revision, revision);
+  const winner = get<AcquisitionWorkflow>('workflows', w.id)!;
+  winner.status = 'completed';
+  saveWorkflow(winner);
+  assert.throws(() => saveWorkflow(w), ConcurrentWorkflowUpdateError);
+  assert.equal(get<AcquisitionWorkflow>('workflows', w.id)!.status, 'completed');
+});
+
+test('restored workflows fence every new child even after parameter and provider identity changes', async () => {
+  const { hashIdentity } = await import('../server/collection-integrity.ts');
+  const { journaledFetch, inheritRestoredScope } = await import('../server/request-journal.ts');
+  const { transaction, UncommittedRequestError } = await import('../server/store.ts');
+  const w = createWorkflow({ ...input, mode: 'live', platform: 'xiaohongshu', supplement: false });
+  put('restore-scopes', { id: hashIdentity('workflow:' + w.id) });
+  const ids: string[] = [];
+  let calls = 0;
+  for (const provider of ['first', 'changed']) {
+    w.input.keyword = provider;
+    w.input.searchLimit++;
+    await runWorkflow(w, async (j) => {
+      ids.push(j.id);
+      await journaledFetch(j.id, (async () => {
+        calls++;
+        return new Response('paid');
+      }) as typeof fetch)('https://' + provider + '.example/search?limit=' + w.input.searchLimit, {
+        headers: { Authorization: provider },
+      });
+    });
+    assert.equal(w.status, 'paused');
+    assert.match(w.message, /备份快照/);
+    assert.ok(get('restore-scopes', hashIdentity(w.currentJobId!)));
+  }
+  assert.equal(new Set(ids).size, 2);
+  assert.equal(calls, 0);
+  assert.throws(
+    () => transaction(() => inheritRestoredScope('workflow:' + w.id, 'rollback-child')),
+    UncommittedRequestError,
+  );
+});

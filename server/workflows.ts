@@ -16,7 +16,7 @@ import type {
   Lead,
   SearchInput,
 } from '../shared/types.ts';
-import { all, get, put, transaction } from './store.ts';
+import { all, get, put, transaction, afterCommit } from './store.ts';
 import { cachedJob } from './jobs-cache.ts';
 import { acquisitionPriority, assessComment, intentScore, qualificationVersion } from './domain.ts';
 import { evaluateBudget, readInterval, protectionStatus } from './protection.ts';
@@ -51,7 +51,7 @@ export function saveWorkflow(w: AcquisitionWorkflow, message?: string) {
     put('workflows', next);
     return next;
   });
-  Object.assign(w, next);
+  afterCommit(() => Object.assign(w, next));
 }
 export function createWorkflow(input: AcquisitionInput): AcquisitionWorkflow {
   if (input.links) {
@@ -406,7 +406,7 @@ export async function runWorkflow(
           next.noteIds = scopedNotes(next, [...next.noteIds, note.id]);
           saveWorkflow(next, `已确认指定作品：${note.title}`);
         });
-        Object.assign(w, next);
+        afterCommit(() => Object.assign(w, next));
       }
       w.selectedNoteIds = [...w.noteIds];
       w.stage = 'comments';

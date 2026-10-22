@@ -285,3 +285,60 @@ test('mismatched persisted response and guard are rejected instead of replayed o
   await assert.rejects(request(url), UncertainRequestError);
   assert.equal(calls, 1);
 });
+
+test('outer rollback cannot erase a claim after dispatch; scoped and unscoped sends wait for durable boundaries', async () => {
+  const { transaction, UncommittedRequestError } = await import('../server/store.ts');
+  let calls = 0;
+  const transport = (async () => {
+    calls++;
+    return new Response('paid');
+  }) as typeof fetch;
+  for (const scope of ['outer-rollback', undefined]) {
+    let pending!: Promise<Response>;
+    assert.throws(
+      () =>
+        transaction(() => {
+          pending = journaledFetch(scope, transport)(url);
+          throw new Error('outer rollback');
+        }),
+      /outer rollback/,
+    );
+    await assert.rejects(pending, UncommittedRequestError);
+  }
+  assert.equal(calls, 0);
+  await journaledFetch('outer-rollback', transport)(url);
+  await journaledFetch('outer-rollback', transport)(url);
+  assert.equal(calls, 1);
+  assert.throws(
+    () =>
+      transaction(async () => {
+        await journaledFetch('async-transaction', transport)(url);
+      }),
+    /同步/,
+  );
+  assert.equal(calls, 1);
+});
+
+test('an async transaction continuation remains unable to dispatch after the synchronous rollback', async () => {
+  const { transaction, UncommittedRequestError } = await import('../server/store.ts');
+  let calls = 0;
+  let observed: unknown;
+  assert.throws(
+    () =>
+      transaction(async () => {
+        await Promise.resolve();
+        try {
+          await journaledFetch('late-transaction', (async () => {
+            calls++;
+            return new Response('paid');
+          }) as typeof fetch)(url);
+        } catch (error) {
+          observed = error;
+        }
+      }),
+    /同步/,
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.ok(observed instanceof UncommittedRequestError);
+  assert.equal(calls, 0);
+});

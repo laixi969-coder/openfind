@@ -3,7 +3,7 @@ export { checkpointDigest } from './collection-integrity.ts';
 import type { Job, Note, Comment } from '../shared/types.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
-import { db, get, put, remove, transaction } from './store.ts';
+import { db, get, put, remove, transaction, assertOutsideTransaction } from './store.ts';
 
 // The unique SQLite key arbitrates across processes, not only JS callers.
 export function claimEntity<T extends { id: string }>(kind: string, item: T) {
@@ -125,6 +125,7 @@ export function assertDispatchAllowed(scope?: string) {
   if (scope && get('restore-scopes', hashIdentity(scope))) throw new RestoredScopeError();
 }
 export function inheritRestoredScope(parent: string, child: string) {
+  assertOutsideTransaction();
   if (get('restore-scopes', hashIdentity(parent)))
     claimEntity('restore-scopes', { id: hashIdentity(child) });
 }
@@ -190,7 +191,9 @@ export function journaledFetch(
   if (!scope)
     return async (url, init) => {
       init?.signal?.throwIfAborted();
+      assertOutsideTransaction();
       beforeDispatch?.();
+      assertOutsideTransaction();
       return transport(url, init);
     };
   return async (url, init) => {
@@ -211,8 +214,10 @@ export function journaledFetch(
       )
         return replay(existing);
       if ((!nextPoll && guard) || replayOnly) throw new UncertainRequestError();
+      assertOutsideTransaction();
       assertDispatchAllowed(scope);
       beforeDispatch?.();
+      assertOutsideTransaction();
       const receipt: Receipt = {
         id,
         state: 'pending',

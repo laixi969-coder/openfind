@@ -282,3 +282,26 @@ test('another completed cache cannot conceal an uncertain first-page request', a
   assert.match(j.error!, /阻止自动重发/);
   assert.deepEqual(cursors, [null]);
 });
+
+test('restored first-page task cannot bypass the fence by changing to the browser data source', async () => {
+  const { hashIdentity } = await import('../server/collection-integrity.ts');
+  const j = job('restored-before-first-page');
+  put('jobs', j);
+  put('restore-scopes', { id: hashIdentity(j.id) });
+  configSet('douyin.provider', 'browser');
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls++;
+    throw Error('unexpected network');
+  }) as typeof fetch;
+  try {
+    await runJob(j, query);
+    assert.match(j.error || '', /备份快照/);
+    assert.equal(calls, 0);
+    assert.equal(j.pages, 0);
+  } finally {
+    globalThis.fetch = original;
+    configSet('douyin.provider', 'http');
+  }
+});

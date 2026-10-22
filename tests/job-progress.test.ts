@@ -260,3 +260,68 @@ test('a stale process cannot overwrite a committed page through page or final st
     worker.kill();
   }
 });
+
+test('outer rollback leaves the in-memory page and receipt state at the durable checkpoint', async () => {
+  const { captureRequestReceipts, journaledFetch } = await import('../server/request-journal.ts');
+  const j = makeJob('outer-page-rollback');
+  put('jobs', j);
+  let calls = 0;
+  const request = journaledFetch(j.id, (async () => {
+    calls++;
+    return new Response('saved');
+  }) as typeof fetch);
+  const response = await captureRequestReceipts(() => request('https://vendor.example/rollback'));
+  assert.throws(
+    () =>
+      transaction(() => {
+        commitJobPage(
+          j,
+          query,
+          [makeNote('rolled-back-note')],
+          { nextCursor: null, visitedCursors: [] },
+          response.receipts,
+        );
+        throw Error('outer rollback');
+      }),
+    /outer rollback/,
+  );
+  assert.equal(j.pages, 0);
+  assert.equal(get('notes', 'rolled-back-note'), undefined);
+  assert.equal(get<any>('request-guards', response.receipts[0].id).state, 'received');
+  const replay = await captureRequestReceipts(() => request('https://vendor.example/rollback'));
+  commitJobPage(
+    j,
+    query,
+    [makeNote('rolled-back-note')],
+    { nextCursor: null, visitedCursors: [] },
+    replay.receipts,
+  );
+  assert.equal(j.pages, 1);
+  assert.equal(calls, 1);
+});
+
+test(
+  'cross-process write contention cannot invalidate a transaction after its first read',
+  { timeout: 10000 },
+  async () => {
+    const { fork } = await import('node:child_process');
+    put('test', { id: 'counter', value: 0 });
+    const worker = fork(new URL('./fixtures/transaction-worker.ts', import.meta.url), [], {
+      execArgv: ['--import', 'tsx'],
+      env: { ...process.env, OPENFIND_DATA_DIR: dir },
+      stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
+    });
+    try {
+      await once(worker, 'message');
+      const result = once(worker, 'message');
+      transaction(() => {
+        const counter = get<{ id: string; value: number }>('test', 'counter')!;
+        put('test', { ...counter, value: counter.value + 1 });
+      });
+      assert.deepEqual((await result)[0], { success: true });
+      assert.equal(get<any>('test', 'counter').value, 2);
+    } finally {
+      worker.kill();
+    }
+  },
+);
