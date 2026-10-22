@@ -4,6 +4,8 @@ import {
   advancePendingPoll,
   UncertainRequestError,
   RequestBudgetError,
+  RestoredScopeError,
+  assertDispatchAllowed,
 } from './request-journal.ts';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
@@ -142,6 +144,7 @@ export function xhsClient(
   const budget = xhsSettings().maxRequests;
   let requests = 0;
   function checkRequest() {
+    assertDispatchAllowed(requestScope);
     if (!key) throw new Error('请先在设置中填写 ' + provider + ' API Key');
     signal?.throwIfAborted();
     if (requests >= budget)
@@ -193,7 +196,11 @@ export function xhsClient(
       replayOnly,
       query,
     )(url, init).catch((error) => {
-      if (error instanceof UncertainRequestError || error instanceof RequestBudgetError)
+      if (
+        error instanceof UncertainRequestError ||
+        error instanceof RequestBudgetError ||
+        error instanceof RestoredScopeError
+      )
         throw error;
       signal?.throwIfAborted();
       throw new Error(provider + ' 请求超时或网络不可用，未自动重试；请求可能已计费');

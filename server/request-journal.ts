@@ -1,7 +1,9 @@
+import { checkpointDigest, hashIdentity, migrateRequestGuards } from './collection-integrity.ts';
+export { checkpointDigest } from './collection-integrity.ts';
 import type { Job, Note, Comment } from '../shared/types.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
-import { all, db, get, put, remove, transaction } from './store.ts';
+import { db, get, put, remove, transaction } from './store.ts';
 
 // The unique SQLite key arbitrates across processes, not only JS callers.
 export function claimEntity<T extends { id: string }>(kind: string, item: T) {
@@ -32,15 +34,7 @@ interface Guard extends ReceiptRef {
 }
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 const guards = 'request-guards';
-// Upgrade old receipts before any cleanup can remove their only dispatch evidence.
-for (const receipt of all<Receipt>('request-receipts'))
-  claimEntity(guards, {
-    id: receipt.id,
-    attempt: receipt.attempt,
-    state: receipt.state,
-    scopeHash: receipt.scopeHash,
-    responseHash: receipt.response ? digest(JSON.stringify(receipt.response)) : undefined,
-  });
+migrateRequestGuards(db);
 const captured = new AsyncLocalStorage<ReceiptRef[]>();
 export async function captureRequestReceipts<T>(work: () => Promise<T>) {
   const receipts: ReceiptRef[] = [];
@@ -83,22 +77,6 @@ export function validateReceiptRefs(jobId: string, page: number, refs: ReceiptRe
 }
 // Only an atomically committed page may relinquish its response body. The guard
 // remains forever: absence of a body must never authorize a second dispatch.
-export function checkpointDigest(job: Job) {
-  return createHash('sha256')
-    .update(
-      JSON.stringify({
-        pages: job.pages,
-        count: job.count,
-        resultIds: job.resultIds,
-        checkpoint: job.checkpoint,
-        dataProvider: job.dataProvider,
-        source: job.source,
-        platform: job.platform,
-        query: job.query,
-      }),
-    )
-    .digest('hex');
-}
 export function compactConsumedReceipt(ref: ReceiptRef) {
   return transaction(() => {
     const guard = get<Guard>(guards, ref.id);
@@ -135,6 +113,20 @@ export function compactConsumedReceipt(ref: ReceiptRef) {
     remove('request-receipts', ref.id);
     return true;
   });
+}
+export class RestoredScopeError extends Error {
+  constructor() {
+    super(
+      '此任务来自备份快照，无法确认快照之后的计费；仅允许重放已保存响应。请核对供应商记录后新建任务',
+    );
+  }
+}
+export function assertDispatchAllowed(scope?: string) {
+  if (scope && get('restore-scopes', hashIdentity(scope))) throw new RestoredScopeError();
+}
+export function inheritRestoredScope(parent: string, child: string) {
+  if (get('restore-scopes', hashIdentity(parent)))
+    claimEntity('restore-scopes', { id: hashIdentity(child) });
 }
 export class RequestBudgetError extends Error {}
 export class UncertainRequestError extends Error {
@@ -219,6 +211,7 @@ export function journaledFetch(
       )
         return replay(existing);
       if ((!nextPoll && guard) || replayOnly) throw new UncertainRequestError();
+      assertDispatchAllowed(scope);
       beforeDispatch?.();
       const receipt: Receipt = {
         id,

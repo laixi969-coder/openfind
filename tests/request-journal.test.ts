@@ -1,6 +1,7 @@
+import { DatabaseSync } from 'node:sqlite';
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, copyFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fork, type ChildProcess } from 'node:child_process';
@@ -81,11 +82,11 @@ test('local preflight rejection does not claim a billable request; credentials a
   assert.ok(!JSON.stringify(all('request-receipts')).includes('private-cookie'));
 });
 
-function worker(scope: string, target: string) {
+function worker(scope: string, target: string, dataDirectory = dir) {
   return fork(new URL('./fixtures/request-worker.ts', import.meta.url), [scope, target], {
     execArgv: ['--import', 'tsx'],
     stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
-    env: { ...process.env, OPENFIND_DATA_DIR: dir },
+    env: { ...process.env, OPENFIND_DATA_DIR: dataDirectory },
   });
 }
 function message(child: ChildProcess) {
@@ -95,6 +96,10 @@ function message(child: ChildProcess) {
       clearTimeout(timer);
       resolve(m as any);
     });
+    child.once('exit', () => {
+      clearTimeout(timer);
+      reject(Error('worker exited before response'));
+    });
     child.once('error', (e) => {
       clearTimeout(timer);
       reject(e);
@@ -102,6 +107,7 @@ function message(child: ChildProcess) {
   });
 }
 async function stop(child: ChildProcess) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
   const exited = new Promise<void>((r) => child.once('exit', () => r()));
   child.kill('SIGKILL');
   await exited;
@@ -225,8 +231,7 @@ test('poll advancement cannot release a successful paid response or unmarked req
   assert.equal(calls, 2);
 });
 
-test('legacy receipts acquire a permanent guard on process startup', async () => {
-  const { remove } = await import('../server/store.ts');
+test('concurrent process startups migrate legacy receipts once and replay without dispatch', async () => {
   const { captureRequestReceipts } = await import('../server/request-journal.ts');
   const captured = await captureRequestReceipts(() =>
     journaledFetch(
@@ -235,15 +240,35 @@ test('legacy receipts acquire a permanent guard on process startup', async () =>
     )(url),
   );
   const ref = captured.receipts[0];
-  remove('request-guards', ref.id);
-  const child = worker('legacy-upgrade', url);
+  const isolated = mkdtempSync(join(tmpdir(), 'openfind-legacy-'));
+  copyFileSync(join(dir, '.credential-key'), join(isolated, '.credential-key'));
+  const oldDb = new DatabaseSync(join(isolated, 'openfind.sqlite'));
+  oldDb.exec(
+    'CREATE TABLE entities(kind TEXT,id TEXT,value TEXT,PRIMARY KEY(kind,id)); CREATE TABLE config(key TEXT PRIMARY KEY,value TEXT);',
+  );
+  const receipt = all<any>('request-receipts').find((r) => r.id === ref.id)!;
+  oldDb
+    .prepare('INSERT INTO entities VALUES(?,?,?)')
+    .run('request-receipts', ref.id, JSON.stringify(receipt));
+  oldDb.close();
+  const children = [
+    worker('legacy-upgrade', url, isolated),
+    worker('legacy-upgrade', url, isolated),
+  ];
   try {
-    assert.equal((await message(child)).result, 'legacy-data');
+    const replies = await Promise.all(children.map(message));
+    for (const reply of replies) assert.equal(reply.result, 'legacy-data');
+    const restored = new DatabaseSync(join(isolated, 'openfind.sqlite'));
+    assert.ok(
+      restored
+        .prepare('SELECT value FROM entities WHERE kind=? AND id=?')
+        .get('request-guards', ref.id),
+    );
+    restored.close();
   } finally {
-    await stop(child);
+    await Promise.all(children.map(stop));
+    rmSync(isolated, { recursive: true, force: true });
   }
-  remove('request-receipts', ref.id);
-  await assert.rejects(journaledFetch('legacy-upgrade')(url), UncertainRequestError);
 });
 
 test('mismatched persisted response and guard are rejected instead of replayed or resent', async () => {

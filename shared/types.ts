@@ -318,6 +318,7 @@ export interface LlmSettings {
   maxComments: number;
 }
 export interface AcquisitionWorkflow {
+  revision?: number;
   qualificationReview?: QualificationReview;
   reviewProgress?: {
     status: 'running' | 'completed' | 'failed';

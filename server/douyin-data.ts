@@ -1,4 +1,9 @@
-import { journaledFetch, UncertainRequestError, RequestBudgetError } from './request-journal.ts';
+import {
+  journaledFetch,
+  UncertainRequestError,
+  RequestBudgetError,
+  RestoredScopeError,
+} from './request-journal.ts';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { Note, SearchInput } from '../shared/types.ts';
@@ -151,7 +156,11 @@ export function douyinClient(
         ? AbortSignal.any([signal, AbortSignal.timeout(45000)])
         : AbortSignal.timeout(45000),
     }).catch((error) => {
-      if (error instanceof UncertainRequestError || error instanceof RequestBudgetError)
+      if (
+        error instanceof UncertainRequestError ||
+        error instanceof RequestBudgetError ||
+        error instanceof RestoredScopeError
+      )
         throw error;
       signal?.throwIfAborted();
       throw new Error(provider + ' 请求超时或网络不可用；未自动重试，请求可能已计费');

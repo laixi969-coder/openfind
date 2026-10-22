@@ -58,7 +58,12 @@ import { join } from 'node:path';
 import multer from 'multer';
 import { dataDir } from './store.ts';
 import { captureRequestReceipts, type ReceiptRef } from './request-journal.ts';
-import { commitJobPage, validateJobCheckpoint } from './job-progress.ts';
+import {
+  commitJobPage,
+  validateJobCheckpoint,
+  saveJobState,
+  ConcurrentJobUpdateError,
+} from './job-progress.ts';
 import { cachedJob } from './jobs-cache.ts';
 import { setTimeout as delay } from 'node:timers/promises';
 import JSZip from 'jszip';
@@ -160,7 +165,7 @@ for (const j of all<Job>('jobs'))
       level: 'WARN',
       message: '服务重启，任务已中止，可重新发起',
     });
-    put('jobs', j);
+    saveJobState(j);
   }
 if (
   !configGet('initialized') &&
@@ -203,7 +208,7 @@ const searchSchema = z.object({
 function log(j: Job, level: Job['logs'][number]['level'], message: string) {
   j.logs.push({ at: new Date().toISOString(), level, message });
   j.logs = j.logs.slice(-1000);
-  put('jobs', j);
+  return saveJobState(j);
 }
 recoverWorkflows();
 const qualificationRuns = new Set<string>();
@@ -280,11 +285,14 @@ export async function runJob(
     if ((job.checkpoint || job.dataProvider) && job.dataProvider !== fingerprint)
       throw new Error('数据源或账号已改变，不能继续旧分页；请恢复原配置或新建流程');
     job.dataProvider = fingerprint;
-    log(
-      job,
-      'INFO',
-      `${job.source === 'demo' ? '演示任务' : '真实任务'}开始：${job.type === 'search' ? input.keyword : job.noteId}`,
-    );
+    if (
+      !log(
+        job,
+        'INFO',
+        `${job.source === 'demo' ? '演示任务' : '真实任务'}开始：${job.type === 'search' ? input.keyword : job.noteId}`,
+      )
+    )
+      return;
     if (job.source === 'live' && !resuming && !job.checkpoint && !input.forceRefresh) {
       const cached = cachedJob(job, input);
       if (cached) {
@@ -425,11 +433,14 @@ export async function runJob(
         receipts,
       );
       job.elapsed = Math.round((Date.now() - started) / 1000);
-      log(
-        job,
-        'SUCCESS',
-        `${job.type === 'search' ? '作品' : '评论'}第 ${job.pages} 页完成，累计 ${job.count} 条（已去重）`,
-      );
+      if (
+        !log(
+          job,
+          'SUCCESS',
+          `${job.type === 'search' ? '作品' : '评论'}第 ${job.pages} 页完成，累计 ${job.count} 条（已去重）`,
+        )
+      )
+        return;
       if (!cursor || (input.limit > 0 && job.count >= input.limit)) break;
       if (repeatedCursor) throw new Error('数据服务返回循环分页游标，已保存本页并停止以防重复请求');
       if (page === 199)
@@ -442,6 +453,10 @@ export async function runJob(
       `任务完成，共保存 ${job.count} 条${job.source === 'demo' ? '演示数据' : ''}`,
     );
   } catch (e) {
+    if (e instanceof ConcurrentJobUpdateError) {
+      Object.assign(job, get<Job>('jobs', job.id));
+      return;
+    }
     if (abort.signal.aborted) {
       job.status = 'stopped';
       log(job, 'WARN', '任务已停止，已采集结果保留');
@@ -468,7 +483,7 @@ export async function runJob(
       job.finishedAt = new Date().toISOString();
       job.dataFetchedAt ||= job.finishedAt;
     }
-    put('jobs', job);
+    saveJobState(job);
     running.delete(job.id);
     parentSignal?.removeEventListener('abort', cancel);
   }

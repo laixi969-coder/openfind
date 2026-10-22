@@ -7,6 +7,27 @@ import {
 import type { Job, Note, Comment, SearchInput } from '../shared/types.ts';
 import { get, put, transaction } from './store.ts';
 
+export class ConcurrentJobUpdateError extends Error {
+  constructor() {
+    super('其他进程已更新任务，已拒绝覆盖分页进度');
+  }
+}
+export function saveJobState(job: Job) {
+  return transaction(() => {
+    const current = get<Job>('jobs', job.id);
+    if (
+      current &&
+      ((current.dataProvider && current.dataProvider !== job.dataProvider) ||
+        current.pages !== job.pages ||
+        (current.pages > 0 && checkpointDigest(current) !== checkpointDigest(job)))
+    ) {
+      Object.assign(job, current);
+      return false;
+    }
+    put('jobs', job);
+    return true;
+  });
+}
 export function commitJobPage(
   job: Job,
   input: SearchInput,
@@ -14,52 +35,59 @@ export function commitJobPage(
   checkpoint?: Job['checkpoint'],
   receipts: ReceiptRef[] = [],
 ) {
-  const kind = job.type === 'search' ? 'notes' : 'comments';
-  // Validate the whole response before overwriting any existing entity.
-  for (const item of items) {
-    if (
-      !item.id ||
-      item.source !== job.source ||
-      (item.platform && item.platform !== job.platform) ||
-      (job.type === 'comments' && (item as Comment).noteId !== job.noteId)
-    )
-      throw new Error('采集结果与任务平台或作品不一致，已拒绝保存');
-    const old = get<Note | Comment>(kind, item.id);
-    if (
-      old &&
-      (old.source !== item.source ||
-        (old.platform && item.platform && old.platform !== item.platform) ||
-        (job.type === 'comments' && (old as Comment).noteId !== (item as Comment).noteId))
-    )
-      throw new Error('采集结果 ID 与已有数据身份冲突，已拒绝覆盖');
-  }
-  const next = structuredClone(job);
-  const seen = new Set(next.resultIds);
-  const accepted: (Note | Comment)[] = [];
-  let truncated = false;
-  for (const item of items) {
-    if (seen.has(item.id)) continue;
-    if (job.type === 'search' && input.noteType !== 'all' && (item as Note).type !== input.noteType)
-      continue;
-    if (input.limit && seen.size >= input.limit) {
-      truncated = true;
-      break;
+  const next = transaction(() => {
+    const current = get<Job>('jobs', job.id);
+    if (current && checkpointDigest(current) !== checkpointDigest(job))
+      throw new ConcurrentJobUpdateError();
+    const kind = job.type === 'search' ? 'notes' : 'comments';
+    // Validate the whole response before overwriting any existing entity.
+    for (const item of items) {
+      if (
+        !item.id ||
+        item.source !== job.source ||
+        (item.platform && item.platform !== job.platform) ||
+        (job.type === 'comments' && (item as Comment).noteId !== job.noteId)
+      )
+        throw new Error('采集结果与任务平台或作品不一致，已拒绝保存');
+      const old = get<Note | Comment>(kind, item.id);
+      if (
+        old &&
+        (old.source !== item.source ||
+          (old.platform && item.platform && old.platform !== item.platform) ||
+          (job.type === 'comments' && (old as Comment).noteId !== (item as Comment).noteId))
+      )
+        throw new Error('采集结果 ID 与已有数据身份冲突，已拒绝覆盖');
     }
-    seen.add(item.id);
-    next.resultIds.push(item.id);
-    accepted.push(item);
-  }
-  next.count = next.resultIds.length;
-  next.pages++;
-  next.checkpoint = checkpoint
-    ? {
-        ...checkpoint,
-        ...(receipts.length ? { requestReceipts: receipts } : {}),
-        exhausted: checkpoint.nextCursor === null && !truncated,
+    const next = structuredClone(job);
+    const seen = new Set(next.resultIds);
+    const accepted: (Note | Comment)[] = [];
+    let truncated = false;
+    for (const item of items) {
+      if (seen.has(item.id)) continue;
+      if (
+        job.type === 'search' &&
+        input.noteType !== 'all' &&
+        (item as Note).type !== input.noteType
+      )
+        continue;
+      if (input.limit && seen.size >= input.limit) {
+        truncated = true;
+        break;
       }
-    : undefined;
-  next.dataFetchedAt = new Date().toISOString();
-  transaction(() => {
+      seen.add(item.id);
+      next.resultIds.push(item.id);
+      accepted.push(item);
+    }
+    next.count = next.resultIds.length;
+    next.pages++;
+    next.checkpoint = checkpoint
+      ? {
+          ...checkpoint,
+          ...(receipts.length ? { requestReceipts: receipts } : {}),
+          exhausted: checkpoint.nextCursor === null && !truncated,
+        }
+      : undefined;
+    next.dataFetchedAt = new Date().toISOString();
     for (const item of accepted) put(kind, { ...item, platform: job.platform });
     if (job.type === 'search' && input.sort === 'latest')
       next.resultIds.sort((a, b) =>
@@ -70,6 +98,7 @@ export function commitJobPage(
     acknowledgeReceipts(job.id, next.pages, receipts);
     put('jobs', next);
     put('job-pages', { id: job.id + ':' + next.pages, digest: checkpointDigest(next), receipts });
+    return next;
   });
   Object.assign(job, next);
 }

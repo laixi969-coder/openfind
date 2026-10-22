@@ -1,3 +1,4 @@
+import { validateCollectionState, fenceRestoredScopes } from './collection-integrity.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, createDecipheriv } from 'node:crypto';
 import {
@@ -32,6 +33,7 @@ function validate(dir: string) {
       throw new Error('数据库完整性检查失败');
     if (Number(db.prepare('PRAGMA user_version').get()!.user_version) > 0)
       throw new Error('不支持此数据库版本，请使用匹配的应用版本');
+    validateCollectionState(db);
     const checkSecret = (value: unknown) => {
       if (!value) return;
       const bytes = Buffer.from(String(value), 'base64');
@@ -146,6 +148,12 @@ export function restoreBackup(source: string, destination: string) {
       writeFileSync(join(stage, name), bytes, { mode: 0o600 });
     }
     validate(stage);
+    const restored = new DatabaseSync(join(stage, 'openfind.sqlite'));
+    try {
+      fenceRestoredScopes(restored);
+    } finally {
+      restored.close();
+    }
     renameSync(stage, destination);
   } catch (error) {
     rmSync(stage, { recursive: true, force: true });

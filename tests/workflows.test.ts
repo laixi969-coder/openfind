@@ -651,3 +651,22 @@ test('missing or changed paid children pause instead of creating a fresh billing
     assert.equal(requests, 0);
   }
 });
+
+test('a competing workflow revision cannot rewind stages or launch a new paid child', async () => {
+  const { saveWorkflow, ConcurrentWorkflowUpdateError } = await import('../server/workflows.ts');
+  const original = createWorkflow(input);
+  const stale = structuredClone(original);
+  original.status = 'completed';
+  original.completedNoteIds = ['finished-note'];
+  saveWorkflow(original);
+  assert.throws(() => saveWorkflow(stale), ConcurrentWorkflowUpdateError);
+  let calls = 0;
+  await runWorkflow(stale, async () => {
+    calls++;
+  });
+  assert.equal(calls, 0);
+  assert.equal(stale.status, 'completed');
+  assert.deepEqual(get<AcquisitionWorkflow>('workflows', original.id)!.completedNoteIds, [
+    'finished-note',
+  ]);
+});

@@ -1,4 +1,5 @@
 import { test, after } from 'node:test';
+import { once } from 'node:events';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -230,4 +231,32 @@ test('a response from a different task cannot acknowledge or advance this page',
   );
   assert.equal(get('notes', 'wrong-owner-note'), undefined);
   assert.equal(get<Job>('jobs', j.id)!.pages, 0);
+});
+
+test('a stale process cannot overwrite a committed page through page or final status writes', async () => {
+  const { fork } = await import('node:child_process');
+  const job = makeJob('cross-process-stale');
+  put('jobs', job);
+  const worker = fork(new URL('./fixtures/progress-worker.ts', import.meta.url), [job.id], {
+    execArgv: ['--import', 'tsx'],
+    env: { ...process.env, OPENFIND_DATA_DIR: dir },
+    stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
+  });
+  try {
+    await once(worker, 'message');
+    commitJobPage(job, query, [makeNote('winner-note')], {
+      nextCursor: 'next',
+      visitedCursors: [],
+    });
+    const result = once(worker, 'message');
+    worker.send('continue');
+    const [message] = await result;
+    assert.deepEqual(message, { rejected: true, saved: false, pages: 1 });
+    const persisted = get<Job>('jobs', job.id)!;
+    assert.equal(persisted.status, 'running');
+    assert.equal(persisted.checkpoint?.nextCursor, 'next');
+    assert.deepEqual(persisted.resultIds, ['winner-note']);
+  } finally {
+    worker.kill();
+  }
 });

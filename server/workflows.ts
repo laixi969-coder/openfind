@@ -1,4 +1,5 @@
-import { validateJobCheckpoint } from './job-progress.ts';
+import { inheritRestoredScope } from './request-journal.ts';
+import { validateJobCheckpoint, saveJobState } from './job-progress.ts';
 import { saveCollectedLead } from './leads.ts';
 import { douyinUsesApi, requireDouyinComments } from './douyin-data.ts';
 import { workflowErrorMessage } from './workflow-errors.ts';
@@ -27,6 +28,11 @@ export type JobExecutor = (
   input: SearchInput & { forceRefresh: boolean; platform: AcquisitionInput['platform'] },
   signal?: AbortSignal,
 ) => Promise<void>;
+export class ConcurrentWorkflowUpdateError extends Error {
+  constructor() {
+    super('其他进程已更新流程，已拒绝覆盖检查点');
+  }
+}
 export function saveWorkflow(w: AcquisitionWorkflow, message?: string) {
   if (message) {
     w.message = message;
@@ -37,8 +43,15 @@ export function saveWorkflow(w: AcquisitionWorkflow, message?: string) {
     });
     w.logs = w.logs.slice(-300);
   }
-  w.updatedAt = new Date().toISOString();
-  put('workflows', w);
+  const next = transaction(() => {
+    const current = get<AcquisitionWorkflow>('workflows', w.id);
+    if (current && (current.revision || 0) !== (w.revision || 0))
+      throw new ConcurrentWorkflowUpdateError();
+    const next = { ...w, updatedAt: new Date().toISOString(), revision: (w.revision || 0) + 1 };
+    put('workflows', next);
+    return next;
+  });
+  Object.assign(w, next);
 }
 export function createWorkflow(input: AcquisitionInput): AcquisitionWorkflow {
   if (input.links) {
@@ -77,14 +90,18 @@ export function createWorkflow(input: AcquisitionInput): AcquisitionWorkflow {
 }
 export function recoverWorkflows() {
   for (const w of all<AcquisitionWorkflow>('workflows')) {
-    if (w.reviewProgress?.status === 'running') {
-      w.reviewProgress.status = 'failed';
-      w.reviewProgress.message = '服务重启，模型复核已中断，已保存结果可继续复核';
-      saveWorkflow(w);
-    }
-    if (w.status === 'running') {
-      w.status = 'paused';
-      saveWorkflow(w, '服务重启，已保留检查点；点击继续流程，已完成步骤不会重跑');
+    try {
+      if (w.reviewProgress?.status === 'running') {
+        w.reviewProgress.status = 'failed';
+        w.reviewProgress.message = '服务重启，模型复核已中断，已保存结果可继续复核';
+        saveWorkflow(w);
+      }
+      if (w.status === 'running') {
+        w.status = 'paused';
+        saveWorkflow(w, '服务重启，已保留检查点；点击继续流程，已完成步骤不会重跑');
+      }
+    } catch (error) {
+      if (!(error instanceof ConcurrentWorkflowUpdateError)) throw error;
     }
   }
 }
@@ -249,7 +266,14 @@ export async function runWorkflow(
   const abort = new AbortController();
   workflowRuns.set(w.id, abort);
   w.status = 'running';
-  saveWorkflow(w);
+  try {
+    saveWorkflow(w);
+  } catch (error) {
+    workflowRuns.delete(w.id);
+    if (!(error instanceof ConcurrentWorkflowUpdateError)) throw error;
+    Object.assign(w, get<AcquisitionWorkflow>('workflows', w.id));
+    return;
+  }
   async function child(type: Job['type'], sort: SearchInput['sort'], note?: Note) {
     abort.signal.throwIfAborted();
     const query = {
@@ -295,6 +319,7 @@ export async function runWorkflow(
           query,
           createdAt: new Date().toISOString(),
         };
+    inheritRestoredScope('workflow:' + w.id, j.id);
     validateJobCheckpoint(j);
     const locallyComplete =
       j.status === 'completed' ||
@@ -303,7 +328,7 @@ export async function runWorkflow(
     abort.signal.throwIfAborted();
     w.currentJobId = j.id;
     if (type === 'search' && !w.searchJobIds.includes(j.id)) w.searchJobIds.push(j.id);
-    put('jobs', j);
+    saveJobState(j);
     saveWorkflow(
       w,
       note
@@ -314,14 +339,14 @@ export async function runWorkflow(
     if (j.status !== 'completed') {
       j.status = 'running';
       delete j.error;
-      put('jobs', j);
+      saveJobState(j);
       try {
         await execute(j, query, abort.signal);
       } catch (error) {
         executionError = error;
         j.status = abort.signal.aborted ? 'stopped' : 'failed';
         j.error = error instanceof Error ? error.message : '子任务执行失败';
-        put('jobs', j);
+        saveJobState(j);
       }
     }
     if (type === 'search') w.noteIds = scopedNotes(w, [...w.noteIds, ...j.resultIds]);
@@ -469,13 +494,22 @@ export async function runWorkflow(
       `流程完成：${w.noteIds.length} 篇候选作品，${w.completedNoteIds.length} 篇已采样，${w.commentIds.length} 条评论，${w.leadIds.length} 条待人工核对的候选线索${w.leadIds.length ? '' : '；没有符合近7天明确需求的评论，不代表采集失败'}`,
     );
   } catch (e) {
+    if (e instanceof ConcurrentWorkflowUpdateError) {
+      Object.assign(w, get<AcquisitionWorkflow>('workflows', w.id));
+      return;
+    }
     w.status = 'paused';
-    saveWorkflow(
-      w,
-      abort.signal.aborted
-        ? '已暂停，保留全部结果与检查点；点击继续流程从当前步骤重试'
-        : workflowErrorMessage(e),
-    );
+    try {
+      saveWorkflow(
+        w,
+        abort.signal.aborted
+          ? '已暂停，保留全部结果与检查点；点击继续流程从当前步骤重试'
+          : workflowErrorMessage(e),
+      );
+    } catch (error) {
+      if (!(error instanceof ConcurrentWorkflowUpdateError)) throw error;
+      Object.assign(w, get<AcquisitionWorkflow>('workflows', w.id));
+    }
   } finally {
     workflowRuns.delete(w.id);
   }
