@@ -305,3 +305,29 @@ test('restored first-page task cannot bypass the fence by changing to the browse
     configSet('douyin.provider', 'http');
   }
 });
+
+test('response write and failure-status write errors preserve the page and release the runner for safe resume', async () => {
+  reset();
+  mode = 'normal';
+  const j = job('response-and-status-failure');
+  db.exec(
+    "CREATE TRIGGER fail_body BEFORE UPDATE ON entities WHEN NEW.kind='request-receipts' AND json_extract(NEW.value,'$.state')='received' BEGIN SELECT RAISE(ABORT, 'response disk failure'); END",
+  );
+  db.exec(
+    "CREATE TRIGGER fail_status BEFORE UPDATE ON entities WHEN NEW.kind='jobs' AND json_extract(NEW.value,'$.status')='failed' BEGIN SELECT RAISE(ABORT, 'status disk failure'); END",
+  );
+  try {
+    await assert.rejects(runJob(j, { ...query, limit: 1 }), /status disk failure/);
+    assert.equal(get<Job>('jobs', j.id)!.pages, 0);
+    assert.equal(get<Job>('jobs', j.id)!.count, 0);
+    assert.deepEqual(cursors, [null]);
+  } finally {
+    db.exec('DROP TRIGGER fail_body; DROP TRIGGER fail_status');
+  }
+  const resumed = get<Job>('jobs', j.id)!;
+  await runJob(resumed, { ...query, limit: 1 });
+  assert.equal(resumed.status, 'completed');
+  assert.equal(resumed.pages, 1);
+  assert.equal(resumed.count, 1);
+  assert.deepEqual(cursors, [null]);
+});

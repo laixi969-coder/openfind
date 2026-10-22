@@ -3,10 +3,19 @@ export { checkpointDigest } from './collection-integrity.ts';
 import type { Job, Note, Comment } from '../shared/types.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
-import { db, get, put, remove, transaction, assertOutsideTransaction } from './store.ts';
+import {
+  db,
+  get,
+  put,
+  remove,
+  transaction,
+  assertOutsideTransaction,
+  assertTransactionUsable,
+} from './store.ts';
 
 // The unique SQLite key arbitrates across processes, not only JS callers.
 export function claimEntity<T extends { id: string }>(kind: string, item: T) {
+  assertTransactionUsable();
   return (
     db
       .prepare('INSERT OR IGNORE INTO entities(kind,id,value) VALUES(?,?,?)')
@@ -137,6 +146,48 @@ export class UncertainRequestError extends Error {
     );
   }
 }
+export class ReceiptPersistenceError extends Error {
+  constructor(retained: boolean) {
+    super(
+      retained
+        ? '响应已收到但尚未写入数据库；本进程暂存了响应，请排除存储故障后继续原任务，仅重试保存，不重新请求。重启将丢失暂存响应'
+        : '响应已收到但无法持久化，暂存容量不足；已保留防重发标记，请核对供应商记录，不会自动重发',
+    );
+  }
+}
+// A failed SQLite commit must not discard a response that is still recoverable
+// in this process. Bound memory; never evict an older response to authorize a send.
+const unsaved = new Map<string, Receipt>();
+const maxUnsavedBytes = 64 * 1024 * 1024;
+function retainResponse(receipt: Receipt) {
+  const bytes = [...unsaved.values()].reduce(
+    (sum, r) => sum + (r.response?.body.length || 0) * 2,
+    0,
+  );
+  if (unsaved.size < 32 && bytes + receipt.response!.body.length * 2 <= maxUnsavedBytes)
+    unsaved.set(receipt.id, receipt);
+}
+function persistResponse(completed: Receipt) {
+  assertOutsideTransaction();
+  try {
+    transaction(() => {
+      const current = get<Guard>(guards, completed.id);
+      if (current?.attempt !== completed.attempt || current.state !== 'pending')
+        throw new UncertainRequestError();
+      put('request-receipts', completed);
+      put(guards, {
+        ...current,
+        state: 'received',
+        responseHash: digest(JSON.stringify(completed.response)),
+      });
+    });
+  } catch (error) {
+    if (error instanceof UncertainRequestError) throw error;
+    throw new ReceiptPersistenceError(unsaved.has(completed.id));
+  }
+  unsaved.delete(completed.id);
+  return completed;
+}
 const flights = new Map<string, Promise<Receipt>>();
 function requestId(scope: string, url: string | URL | Request, init?: RequestInit) {
   // Persist only a digest of identity, never URLs, authorization headers or cookies.
@@ -211,8 +262,12 @@ export function journaledFetch(
         guard?.attempt === existing.attempt &&
         (guard.state === 'received' || guard.state === 'consumed') &&
         guard.responseHash === digest(JSON.stringify(existing.response))
-      )
+      ) {
+        unsaved.delete(id);
         return replay(existing);
+      }
+      const retained = unsaved.get(id);
+      if (retained) return replay(persistResponse(retained));
       if ((!nextPoll && guard) || replayOnly) throw new UncertainRequestError();
       assertOutsideTransaction();
       assertDispatchAllowed(scope);
@@ -255,18 +310,8 @@ export function journaledFetch(
         const response = await transport(url, init);
         const result = { status: response.status, body: await response.text() };
         const completed: Receipt = { ...receipt, state: 'received', response: result };
-        transaction(() => {
-          const current = get<Guard>(guards, id);
-          if (current?.attempt !== receipt.attempt || current.state !== 'pending')
-            throw new UncertainRequestError();
-          put('request-receipts', completed);
-          put(guards, {
-            ...current,
-            state: 'received',
-            responseHash: digest(JSON.stringify(result)),
-          });
-        });
-        return completed;
+        retainResponse(completed);
+        return persistResponse(completed);
       })();
       flights.set(id, flight);
     }

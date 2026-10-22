@@ -200,6 +200,9 @@ if (
   configSet('initialized', 'true');
 }
 const running = new Map<string, AbortController>();
+function backgroundFailure() {
+  console.error('后台任务未能保存状态，已停止执行；请排除存储故障后继续原任务，勿直接重建付费任务');
+}
 const searchSchema = z.object({
   forceRefresh: z.boolean().default(false),
   keyword: z.string().trim().min(1, '请输入关键词').max(100),
@@ -475,24 +478,27 @@ export async function runJob(
       log(job, e instanceof XhsPendingError ? 'WARN' : 'ERROR', job.error);
     }
   } finally {
-    if (collector)
-      log(
-        job,
-        'INFO',
-        `数据源 ${collector.provider}，本次 API 请求 ${collector.requests} 次；计费以供应商账单为准`,
-      );
-    if (readId)
-      await browserCall('/close-read', { cursor: readId }, AbortSignal.timeout(3000)).catch(
-        () => {},
-      );
-    job.elapsed = Math.round((Date.now() - started) / 1000);
-    if (job.status === 'completed') {
-      job.finishedAt = new Date().toISOString();
-      job.dataFetchedAt ||= job.finishedAt;
+    try {
+      if (collector)
+        log(
+          job,
+          'INFO',
+          `数据源 ${collector.provider}，本次 API 请求 ${collector.requests} 次；计费以供应商账单为准`,
+        );
+      if (readId)
+        await browserCall('/close-read', { cursor: readId }, AbortSignal.timeout(3000)).catch(
+          () => {},
+        );
+      job.elapsed = Math.round((Date.now() - started) / 1000);
+      if (job.status === 'completed') {
+        job.finishedAt = new Date().toISOString();
+        job.dataFetchedAt ||= job.finishedAt;
+      }
+      saveJobState(job);
+    } finally {
+      running.delete(job.id);
+      parentSignal?.removeEventListener('abort', cancel);
     }
-    saveJobState(job);
-    running.delete(job.id);
-    parentSignal?.removeEventListener('abort', cancel);
   }
 }
 app.get('/api/health', (_req, res) => res.json({ ok: true, name: 'openfind' }));
@@ -580,7 +586,7 @@ app.post('/api/workflows/links', (req, res) => {
     commentLimit: input.commentLimit,
     supplement: false,
   });
-  void runWorkflow(w, runJob, resolveWorkflowWork);
+  void runWorkflow(w, runJob, resolveWorkflowWork).catch(backgroundFailure);
   res.status(201).json(w);
 });
 app.post('/api/workflows', (req, res) => {
@@ -597,7 +603,7 @@ app.post('/api/workflows', (req, res) => {
   }
   if (rejectCommentSource(res, input.platform, input.mode)) return;
   const w = createWorkflow(input);
-  void runWorkflow(w, runJob);
+  void runWorkflow(w, runJob).catch(backgroundFailure);
   res.status(201).json(w);
 });
 app.post('/api/workflows/:id/review', async (req, res) => {
@@ -643,7 +649,7 @@ app.post('/api/workflows/:id/:action', (req, res) => {
       return;
     }
     if (rejectCommentSource(res, w.input.platform, w.input.mode)) return;
-    void runWorkflow(w, runJob, resolveWorkflowWork);
+    void runWorkflow(w, runJob, resolveWorkflowWork).catch(backgroundFailure);
   } else {
     res.status(404).json({ error: '未知操作' });
     return;
@@ -689,7 +695,7 @@ app.post('/api/jobs', (req, res) => {
     createdAt: new Date().toISOString(),
   };
   put('jobs', j);
-  void runJob(j, input);
+  void runJob(j, input).catch(backgroundFailure);
   res.status(201).json(j);
 });
 app.post('/api/jobs/:id/stop', (req, res) => {
@@ -759,7 +765,7 @@ app.post('/api/comments/collect', (req, res) => {
     mode: note.source,
     platform: note.platform,
     interval: input.interval,
-  });
+  }).catch(backgroundFailure);
   res.status(201).json(j);
 });
 app.post('/api/leads/collect', (req, res) => {

@@ -5,6 +5,7 @@ import {
   UncertainRequestError,
   RequestBudgetError,
   RestoredScopeError,
+  ReceiptPersistenceError,
   assertDispatchAllowed,
 } from './request-journal.ts';
 import { createHash } from 'node:crypto';
@@ -199,7 +200,8 @@ export function xhsClient(
       if (
         error instanceof UncertainRequestError ||
         error instanceof RequestBudgetError ||
-        error instanceof RestoredScopeError
+        error instanceof RestoredScopeError ||
+        error instanceof ReceiptPersistenceError
       )
         throw error;
       signal?.throwIfAborted();

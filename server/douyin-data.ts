@@ -3,6 +3,7 @@ import {
   UncertainRequestError,
   RequestBudgetError,
   RestoredScopeError,
+  ReceiptPersistenceError,
 } from './request-journal.ts';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
@@ -159,7 +160,8 @@ export function douyinClient(
       if (
         error instanceof UncertainRequestError ||
         error instanceof RequestBudgetError ||
-        error instanceof RestoredScopeError
+        error instanceof RestoredScopeError ||
+        error instanceof ReceiptPersistenceError
       )
         throw error;
       signal?.throwIfAborted();

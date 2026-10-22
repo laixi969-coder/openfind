@@ -29,20 +29,26 @@ export const get = <T>(kind: string, id: string): T | undefined => {
   const r = db.prepare('SELECT value FROM entities WHERE kind=? AND id=?').get(kind, id);
   return r ? JSON.parse(r.value as string) : undefined;
 };
-export const put = <T extends { id: string }>(kind: string, item: T) =>
-  db
+export const put = <T extends { id: string }>(kind: string, item: T) => {
+  assertTransactionUsable();
+  return db
     .prepare(
       'INSERT INTO entities(kind,id,value) VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET value=excluded.value',
     )
     .run(kind, item.id, JSON.stringify(item));
-export const remove = (kind: string, id: string) =>
-  db.prepare('DELETE FROM entities WHERE kind=? AND id=?').run(kind, id);
+};
+export const remove = (kind: string, id: string) => {
+  assertTransactionUsable();
+  return db.prepare('DELETE FROM entities WHERE kind=? AND id=?').run(kind, id);
+};
 export const configGet = (name: string, fallback = ''): string =>
   (db.prepare('SELECT value FROM config WHERE key=?').get(name)?.value as string) || fallback;
-export const configSet = (name: string, value: string) =>
-  db
+export const configSet = (name: string, value: string) => {
+  assertTransactionUsable();
+  return db
     .prepare('INSERT INTO config VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
     .run(name, value);
+};
 export function encrypt(value: string) {
   const iv = randomBytes(12);
   const c = createCipheriv('aes-256-gcm', key, iv);
@@ -60,6 +66,10 @@ export function decrypt(value: string) {
 // upgrade after a different process writes, losing a just-received response.
 const commitCallbacks: (() => void)[][] = [];
 const transactionContext = new AsyncLocalStorage<boolean>();
+let invalidTransaction: { error: unknown } | undefined;
+export function assertTransactionUsable() {
+  if (invalidTransaction) throw invalidTransaction.error;
+}
 export class UncommittedRequestError extends Error {
   constructor() {
     super('数据库事务尚未提交，已阻止发送请求，避免回滚防重发记录后重复计费');
@@ -76,6 +86,7 @@ export function afterCommit(callback: () => void) {
   else callback();
 }
 export function transaction<T>(work: () => T): T {
+  assertTransactionUsable();
   const outer = commitCallbacks.length === 0;
   const savepoint = 'openfind_write_' + commitCallbacks.length;
   db.exec(outer ? 'BEGIN IMMEDIATE' : 'SAVEPOINT ' + savepoint);
@@ -89,16 +100,26 @@ export function transaction<T>(work: () => T): T {
       void Promise.resolve(result).catch(() => {});
       throw new Error('数据库事务回调必须同步完成');
     }
+    assertTransactionUsable();
     db.exec(outer ? 'COMMIT' : 'RELEASE SAVEPOINT ' + savepoint);
   } catch (error) {
-    db.exec(
-      outer
-        ? 'ROLLBACK'
-        : 'ROLLBACK TO SAVEPOINT ' + savepoint + '; RELEASE SAVEPOINT ' + savepoint,
-    );
+    // SQLITE_FULL/IOERR and RAISE(ROLLBACK) can already have rolled back the
+    // transaction. Cleanup must not replace the original storage failure.
+    try {
+      db.exec(
+        outer
+          ? 'ROLLBACK'
+          : 'ROLLBACK TO SAVEPOINT ' + savepoint + '; RELEASE SAVEPOINT ' + savepoint,
+      );
+    } catch {
+      // An inner automatic rollback also destroys its parent transaction.
+      // Do not let a caller catch it and accidentally continue in autocommit.
+      invalidTransaction ||= { error };
+    }
     throw error;
   } finally {
     commitCallbacks.pop();
+    if (outer) invalidTransaction = undefined;
   }
   const parent = commitCallbacks.at(-1);
   if (parent) parent.push(...callbacks);

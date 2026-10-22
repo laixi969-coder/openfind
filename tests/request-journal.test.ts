@@ -342,3 +342,64 @@ test('an async transaction continuation remains unable to dispatch after the syn
   assert.ok(observed instanceof UncommittedRequestError);
   assert.equal(calls, 0);
 });
+
+test('a lock timeout after response arrival retries only persistence, including concurrent resumes', async () => {
+  const { ReceiptPersistenceError } = await import('../server/request-journal.ts');
+  let child: ChildProcess | undefined;
+  let calls = 0;
+  const request = journaledFetch('locked-response', (async () => {
+    calls++;
+    child = fork(new URL('./fixtures/lock-worker.ts', import.meta.url), [], {
+      execArgv: ['--import', 'tsx'],
+      stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
+      env: { ...process.env, OPENFIND_DATA_DIR: dir },
+    });
+    await message(child);
+    return new Response('response retained through lock timeout');
+  }) as typeof fetch);
+  db.exec('PRAGMA busy_timeout=30');
+  try {
+    await assert.rejects(request(url), ReceiptPersistenceError);
+    const unlocked = message(child!);
+    child!.send('release');
+    await unlocked;
+    const results = await Promise.all([request(url), request(url)]);
+    for (const result of results)
+      assert.equal(await result.text(), 'response retained through lock timeout');
+    assert.equal(calls, 1);
+  } finally {
+    db.exec('PRAGMA busy_timeout=5000');
+    if (child) await stop(child);
+  }
+});
+
+test('SIGKILL after a received body fails to persist keeps pending guards and forbids resend', async () => {
+  let calls = 0;
+  const server = createServer((_req, res) => {
+    calls++;
+    res.end('paid but not durable');
+  }).listen(0, '127.0.0.1');
+  await new Promise<void>((r) => server.once('listening', r));
+  const target = `http://127.0.0.1:${(server.address() as { port: number }).port}/paid`;
+  const child = fork(
+    new URL('./fixtures/response-failure-worker.ts', import.meta.url),
+    ['failed-before-crash', target],
+    {
+      execArgv: ['--import', 'tsx'],
+      stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
+      env: { ...process.env, OPENFIND_DATA_DIR: dir },
+    },
+  );
+  try {
+    assert.match((await message(child)).error!, /尚未写入数据库/);
+    await stop(child);
+    db.exec('DROP TRIGGER fail_received');
+    await assert.rejects(journaledFetch('failed-before-crash')(target), UncertainRequestError);
+    assert.equal(calls, 1);
+  } finally {
+    await stop(child);
+    db.exec('DROP TRIGGER IF EXISTS fail_received');
+    server.closeAllConnections();
+    await new Promise<void>((r) => server.close(() => r()));
+  }
+});

@@ -325,3 +325,44 @@ test(
     }
   },
 );
+
+test('SQLite automatic rollback preserves the original failure and leaves the next transaction usable', () => {
+  db.exec(
+    "CREATE TRIGGER auto_rollback BEFORE INSERT ON entities WHEN NEW.kind='rollback-test' BEGIN SELECT RAISE(ROLLBACK, 'simulated storage failure'); END",
+  );
+  try {
+    assert.throws(
+      () => transaction(() => put('rollback-test', { id: 'failed' })),
+      /simulated storage failure/,
+    );
+    assert.equal(get('rollback-test', 'failed'), undefined);
+  } finally {
+    db.exec('DROP TRIGGER auto_rollback');
+  }
+  transaction(() => put('rollback-test', { id: 'recovered' }));
+  assert.ok(get('rollback-test', 'recovered'));
+});
+
+test('caught inner automatic rollback cannot turn outer writes into untracked autocommit', () => {
+  db.exec(
+    "CREATE TRIGGER inner_auto_rollback BEFORE INSERT ON entities WHEN NEW.kind='inner-failure' BEGIN SELECT RAISE(ROLLBACK, 'nested disk failure'); END",
+  );
+  try {
+    assert.throws(
+      () =>
+        transaction(() => {
+          put('rollback-test', { id: 'before-inner-failure' });
+          try {
+            transaction(() => put('inner-failure', { id: 'fail' }));
+          } catch {}
+          put('rollback-test', { id: 'must-not-autocommit' });
+        }),
+      /nested disk failure/,
+    );
+    assert.equal(get('rollback-test', 'before-inner-failure'), undefined);
+    assert.equal(get('rollback-test', 'must-not-autocommit'), undefined);
+  } finally {
+    db.exec('DROP TRIGGER inner_auto_rollback');
+  }
+  transaction(() => put('rollback-test', { id: 'after-nested-failure' }));
+});
