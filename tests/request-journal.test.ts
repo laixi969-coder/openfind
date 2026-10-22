@@ -85,7 +85,7 @@ test('local preflight rejection does not claim a billable request; credentials a
 function worker(scope: string, target: string, dataDirectory = dir) {
   return fork(new URL('./fixtures/request-worker.ts', import.meta.url), [scope, target], {
     execArgv: ['--import', 'tsx'],
-    stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+    stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
     env: { ...process.env, OPENFIND_DATA_DIR: dataDirectory },
   });
 }
@@ -250,13 +250,17 @@ test('concurrent process startups migrate legacy receipts once and replay withou
   oldDb
     .prepare('INSERT INTO entities VALUES(?,?,?)')
     .run('request-receipts', ref.id, JSON.stringify(receipt));
-  oldDb.close();
+  oldDb.exec('BEGIN IMMEDIATE');
   const children = [
     worker('legacy-upgrade', url, isolated),
     worker('legacy-upgrade', url, isolated),
   ];
   try {
-    const replies = await Promise.all(children.map(message));
+    const repliesPromise = Promise.all(children.map(message));
+    await new Promise<void>((resolve) => setTimeout(resolve, 200));
+    oldDb.exec('COMMIT');
+    oldDb.close();
+    const replies = await repliesPromise;
     for (const reply of replies) assert.equal(reply.result, 'legacy-data');
     const restored = new DatabaseSync(join(isolated, 'openfind.sqlite'));
     assert.ok(
@@ -267,6 +271,7 @@ test('concurrent process startups migrate legacy receipts once and replay withou
     restored.close();
   } finally {
     await Promise.all(children.map(stop));
+    if (oldDb.isOpen) oldDb.close();
     rmSync(isolated, { recursive: true, force: true });
   }
 });

@@ -57,7 +57,11 @@ export function acknowledgeReceipts(jobId: string, page: number, receipts: Recei
     if (
       !guard ||
       guard.attempt !== ref.attempt ||
+      guard.id !== ref.id ||
       !receipt?.response ||
+      receipt.id !== ref.id ||
+      receipt.state !== 'received' ||
+      receipt.scopeHash !== guard.scopeHash ||
       receipt.attempt !== ref.attempt ||
       guard.responseHash !== digest(JSON.stringify(receipt.response)) ||
       (guard.scopeHash && guard.scopeHash !== digest(jobId)) ||
@@ -139,6 +143,11 @@ export function inheritRestoredScope(parent: string, child: string) {
     claimEntity('restore-scopes', { id: hashIdentity(child) });
 }
 export class RequestBudgetError extends Error {}
+export class ResponseCapacityError extends RequestBudgetError {
+  constructor() {
+    super('存在待保存响应或并发名额已满，尚未发送新请求；请先继续原任务保存暂存响应');
+  }
+}
 export class UncertainRequestError extends Error {
   constructor() {
     super(
@@ -159,12 +168,24 @@ export class ReceiptPersistenceError extends Error {
 // in this process. Bound memory; never evict an older response to authorize a send.
 const unsaved = new Map<string, Receipt>();
 const maxUnsavedBytes = 64 * 1024 * 1024;
+const maxResponseSlots = 32;
+const responseSlots = new Set<string>();
+function unsavedBytes() {
+  return [...unsaved.values()].reduce((sum, r) => sum + (r.response?.body.length || 0) * 2, 0);
+}
+// A failed save blocks fresh paid work until existing responses are recovered.
+// Reserve slots before dispatch so concurrent arrivals cannot exhaust the count.
+function reserveResponseSlot(id: string) {
+  if (responseSlots.has(id) || unsaved.size > 0 || responseSlots.size >= maxResponseSlots)
+    throw new ResponseCapacityError();
+  responseSlots.add(id);
+}
 function retainResponse(receipt: Receipt) {
-  const bytes = [...unsaved.values()].reduce(
-    (sum, r) => sum + (r.response?.body.length || 0) * 2,
-    0,
-  );
-  if (unsaved.size < 32 && bytes + receipt.response!.body.length * 2 <= maxUnsavedBytes)
+  responseSlots.delete(receipt.id);
+  if (
+    unsaved.size < maxResponseSlots &&
+    unsavedBytes() + receipt.response!.body.length * 2 <= maxUnsavedBytes
+  )
     unsaved.set(receipt.id, receipt);
 }
 function persistResponse(completed: Receipt) {
@@ -172,7 +193,33 @@ function persistResponse(completed: Receipt) {
   try {
     transaction(() => {
       const current = get<Guard>(guards, completed.id);
-      if (current?.attempt !== completed.attempt || current.state !== 'pending')
+      const receipt = get<Receipt>('request-receipts', completed.id);
+      if (
+        current?.id !== completed.id ||
+        current.attempt !== completed.attempt ||
+        current.scopeHash !== completed.scopeHash ||
+        receipt?.id !== completed.id ||
+        receipt.attempt !== completed.attempt ||
+        receipt.scopeHash !== completed.scopeHash ||
+        receipt.polling !== completed.polling ||
+        receipt.createdAt !== completed.createdAt
+      )
+        throw new UncertainRequestError();
+      const responseHash = digest(JSON.stringify(completed.response));
+      if (
+        receipt.state === 'received' &&
+        current.responseHash === responseHash &&
+        digest(JSON.stringify(receipt.response)) === responseHash &&
+        ['received', 'consumed', 'poll-ready'].includes(current.state)
+      )
+        return;
+      if (
+        current.state !== 'pending' ||
+        current.responseHash !== undefined ||
+        current.consumedBy !== undefined ||
+        receipt.state !== 'pending' ||
+        receipt.response !== undefined
+      )
         throw new UncertainRequestError();
       put('request-receipts', completed);
       put(guards, {
@@ -258,11 +305,24 @@ export function journaledFetch(
       const nextPoll = polling && guard?.state === 'poll-ready';
       if (
         !nextPoll &&
-        existing?.state === 'received' &&
-        guard?.attempt === existing.attempt &&
+        existing?.id === id &&
+        existing.state === 'received' &&
+        existing.response &&
+        guard?.id === id &&
+        guard.scopeHash === existing.scopeHash &&
+        (!guard.scopeHash || guard.scopeHash === digest(scope)) &&
+        guard.attempt === existing.attempt &&
         (guard.state === 'received' || guard.state === 'consumed') &&
         guard.responseHash === digest(JSON.stringify(existing.response))
       ) {
+        const retained = unsaved.get(id);
+        if (
+          retained &&
+          (retained.attempt !== existing.attempt ||
+            retained.scopeHash !== existing.scopeHash ||
+            digest(JSON.stringify(retained.response)) !== guard.responseHash)
+        )
+          throw new UncertainRequestError();
         unsaved.delete(id);
         return replay(existing);
       }
@@ -271,54 +331,63 @@ export function journaledFetch(
       if ((!nextPoll && guard) || replayOnly) throw new UncertainRequestError();
       assertOutsideTransaction();
       assertDispatchAllowed(scope);
-      beforeDispatch?.();
-      assertOutsideTransaction();
-      const receipt: Receipt = {
-        id,
-        state: 'pending',
-        createdAt: new Date().toISOString(),
-        attempt: randomUUID(),
-        scopeHash: digest(scope),
-        polling,
-      };
-      transaction(() => {
-        const current = get<Guard>(guards, id);
-        if (nextPoll) {
-          if (current?.state !== 'poll-ready' || current.attempt !== guard!.attempt)
+      reserveResponseSlot(id);
+      try {
+        beforeDispatch?.();
+        assertOutsideTransaction();
+        const receipt: Receipt = {
+          id,
+          state: 'pending',
+          createdAt: new Date().toISOString(),
+          attempt: randomUUID(),
+          scopeHash: digest(scope),
+          polling,
+        };
+        transaction(() => {
+          const current = get<Guard>(guards, id);
+          if (nextPoll) {
+            if (current?.state !== 'poll-ready' || current.attempt !== guard!.attempt)
+              throw new UncertainRequestError();
+            put(guards, {
+              id,
+              attempt: receipt.attempt,
+              state: 'pending',
+              scopeHash: receipt.scopeHash,
+            });
+          } else if (
+            !claimEntity(guards, {
+              id,
+              attempt: receipt.attempt,
+              state: 'pending',
+              scopeHash: receipt.scopeHash,
+            })
+          ) {
             throw new UncertainRequestError();
-          put(guards, {
-            id,
-            attempt: receipt.attempt,
-            state: 'pending',
-            scopeHash: receipt.scopeHash,
-          });
-        } else if (
-          !claimEntity(guards, {
-            id,
-            attempt: receipt.attempt,
-            state: 'pending',
-            scopeHash: receipt.scopeHash,
-          })
-        ) {
-          throw new UncertainRequestError();
-        }
-        put('request-receipts', receipt);
-      });
-      flight = (async () => {
-        // The durable claim precedes dispatch. Failure at any later boundary must
-        // leave it in place: a timeout cannot tell us whether the vendor charged.
-        const response = await transport(url, init);
-        const result = { status: response.status, body: await response.text() };
-        const completed: Receipt = { ...receipt, state: 'received', response: result };
-        retainResponse(completed);
-        return persistResponse(completed);
-      })();
-      flights.set(id, flight);
+          }
+          put('request-receipts', receipt);
+        });
+        flight = (async () => {
+          // The durable claim precedes dispatch. Failure at any later boundary must
+          // leave it in place: a timeout cannot tell us whether the vendor charged.
+          const response = await transport(url, init);
+          const result = { status: response.status, body: await response.text() };
+          const completed: Receipt = { ...receipt, state: 'received', response: result };
+          retainResponse(completed);
+          return persistResponse(completed);
+        })();
+        flights.set(id, flight);
+      } catch (error) {
+        responseSlots.delete(id);
+        throw error;
+      }
     }
     try {
       return replay(await flight);
     } finally {
-      if (flights.get(id) === flight) flights.delete(id);
+      if (flights.get(id) === flight) {
+        flights.delete(id);
+        responseSlots.delete(id);
+      }
     }
   };
 }

@@ -366,3 +366,43 @@ test('caught inner automatic rollback cannot turn outer writes into untracked au
   }
   transaction(() => put('rollback-test', { id: 'after-nested-failure' }));
 });
+
+test('a received body with changed scope cannot acknowledge or advance a page', async () => {
+  const { captureRequestReceipts, journaledFetch } = await import('../server/request-journal.ts');
+  const j = makeJob('scope-changed-before-page');
+  put('jobs', j);
+  const response = await captureRequestReceipts(() =>
+    journaledFetch(
+      j.id,
+      (async () => new Response('paid response')) as typeof fetch,
+    )('https://vendor.example/scope-change'),
+  );
+  const ref = response.receipts[0];
+  const receipt = get<any>('request-receipts', ref.id);
+  put('request-receipts', { ...receipt, scopeHash: 'another-scope' });
+  assert.throws(
+    () =>
+      commitJobPage(
+        j,
+        query,
+        [makeNote('scope-change-note')],
+        { nextCursor: null, visitedCursors: [] },
+        response.receipts,
+      ),
+    /不一致/,
+  );
+  assert.equal(j.pages, 0);
+  assert.equal(get<Job>('jobs', j.id)!.pages, 0);
+  assert.equal(get('notes', 'scope-change-note'), undefined);
+  assert.equal(get('job-pages', j.id + ':1'), undefined);
+  assert.equal(get<any>('request-guards', ref.id).state, 'received');
+  put('request-receipts', receipt);
+  commitJobPage(
+    j,
+    query,
+    [makeNote('scope-change-note')],
+    { nextCursor: null, visitedCursors: [] },
+    response.receipts,
+  );
+  assert.equal(j.pages, 1);
+});

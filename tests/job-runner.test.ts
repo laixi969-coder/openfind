@@ -331,3 +331,41 @@ test('response write and failure-status write errors preserve the page and relea
   assert.equal(resumed.count, 1);
   assert.deepEqual(cursors, [null]);
 });
+
+test('concurrent resumes through repeated receipt and page failures never advance an unsaved page', async () => {
+  reset();
+  mode = 'normal';
+  const j = job('repeated-recovery-failure');
+  db.exec(
+    "CREATE TRIGGER repeat_guard_failure BEFORE UPDATE ON entities WHEN NEW.kind='request-guards' AND json_extract(NEW.value,'$.state')='received' BEGIN SELECT RAISE(ABORT, 'guard save failed'); END",
+  );
+  try {
+    await runJob(j, { ...query, limit: 1 });
+    await Promise.all([
+      runJob({ ...j }, { ...query, limit: 1 }),
+      runJob({ ...j }, { ...query, limit: 1 }),
+    ]);
+    assert.equal(get<Job>('jobs', j.id)!.pages, 0);
+    assert.equal(get('job-pages', j.id + ':1'), undefined);
+    assert.deepEqual(cursors, [null]);
+  } finally {
+    db.exec('DROP TRIGGER repeat_guard_failure');
+  }
+  db.exec(
+    "CREATE TRIGGER repeat_page_failure BEFORE INSERT ON entities WHEN NEW.kind='notes' BEGIN SELECT RAISE(ABORT, 'page save failed'); END",
+  );
+  try {
+    await runJob(get<Job>('jobs', j.id)!, { ...query, limit: 1 });
+    assert.equal(get<Job>('jobs', j.id)!.pages, 0);
+    assert.equal(get<Job>('jobs', j.id)!.count, 0);
+    assert.equal(get('job-pages', j.id + ':1'), undefined);
+  } finally {
+    db.exec('DROP TRIGGER repeat_page_failure');
+  }
+  const resumed = get<Job>('jobs', j.id)!;
+  await runJob(resumed, { ...query, limit: 1 });
+  assert.equal(resumed.status, 'completed');
+  assert.equal(resumed.pages, 1);
+  assert.equal(resumed.count, 1);
+  assert.deepEqual(cursors, [null]);
+});

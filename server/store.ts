@@ -17,8 +17,27 @@ chmodSync(keyPath, 0o600);
 const key = readFileSync(keyPath);
 if (key.length !== 32) throw new Error('凭证密钥损坏，必须恢复原始 32 字节密钥');
 export const db = new DatabaseSync(join(dataDir, 'openfind.sqlite'));
+db.exec('PRAGMA busy_timeout=5000');
+// Concurrent opens can return BUSY immediately while changing journal mode,
+// even with busy_timeout set. Retry only local initialization, never requests.
+const journalDeadline = Date.now() + 5000;
+for (;;) {
+  try {
+    db.exec('PRAGMA journal_mode=WAL');
+    break;
+  } catch (error) {
+    const code = (error as { errcode?: number }).errcode;
+    if ((code !== 5 && code !== 6) || Date.now() >= journalDeadline) throw error;
+    Atomics.wait(
+      new Int32Array(new SharedArrayBuffer(4)),
+      0,
+      0,
+      Math.min(25, journalDeadline - Date.now()),
+    );
+  }
+}
 db.exec(
-  'PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS entities(kind TEXT NOT NULL,id TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(kind,id)); CREATE TABLE IF NOT EXISTS config(key TEXT PRIMARY KEY,value TEXT NOT NULL);',
+  'CREATE TABLE IF NOT EXISTS entities(kind TEXT NOT NULL,id TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(kind,id)); CREATE TABLE IF NOT EXISTS config(key TEXT PRIMARY KEY,value TEXT NOT NULL);',
 );
 export const all = <T>(kind: string): T[] =>
   db
