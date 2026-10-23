@@ -84,10 +84,17 @@ test('in-flight requests reserve all 32 slots; repeated recovery failures neithe
 test('the byte limit blocks new dispatch without blocking persistence of the response at the limit', async () => {
   let calls = 0;
   const body = 'x'.repeat(32 * 1024 * 1024);
-  const request = journaledFetch('byte-limit', (async () => {
-    calls++;
-    return new Response(body);
-  }) as typeof fetch);
+  const request = journaledFetch(
+    'byte-limit',
+    (async () => {
+      calls++;
+      return new Response(body);
+    }) as typeof fetch,
+    undefined,
+    false,
+    false,
+    40 * 1024 * 1024,
+  );
   const other = journaledFetch('after-byte-limit', (async () => {
     calls++;
     return new Response('new');
@@ -259,10 +266,17 @@ test('an already dispatched response larger than the memory budget fails explici
   const { hashIdentity } = await import('../server/collection-integrity.ts');
   const scope = 'oversized-response';
   let calls = 0;
-  const request = journaledFetch(scope, (async () => {
-    calls++;
-    return new Response('x'.repeat(32 * 1024 * 1024 + 1));
-  }) as typeof fetch);
+  const request = journaledFetch(
+    scope,
+    (async () => {
+      calls++;
+      return new Response('x'.repeat(32 * 1024 * 1024 + 1));
+    }) as typeof fetch,
+    undefined,
+    false,
+    false,
+    40 * 1024 * 1024,
+  );
   failGuardWrite();
   try {
     await assert.rejects(

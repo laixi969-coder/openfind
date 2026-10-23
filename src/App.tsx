@@ -1,4 +1,5 @@
 import { Inbox } from './components/Inbox';
+import { SafetyNotice } from './components/DataSafety';
 import { useCallback, useEffect, useState } from 'react';
 import {
   Search,
@@ -277,6 +278,7 @@ export default function App() {
             </div>
           </header>
           <main className="main-content">
+            <SafetyNotice />
             {error && (
               <div className="inline-error">
                 <AlertCircle size={15} />

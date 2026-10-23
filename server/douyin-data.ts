@@ -6,6 +6,7 @@ import {
   ReceiptPersistenceError,
 } from './request-journal.ts';
 import { createHash } from 'node:crypto';
+import { readLimitedBody } from './remote-media.ts';
 import { z } from 'zod';
 import type { Note, SearchInput } from '../shared/types.ts';
 import { configGet, configSet, encrypt, decrypt } from './store.ts';
@@ -171,7 +172,9 @@ export function douyinClient(
       throw new Error(
         `${provider} HTTP ${response.status}，请检查接口权限、密钥和余额；未自动重试`,
       );
-    const root = parsePlatformJSON(await response.text());
+    const root = parsePlatformJSON(
+      (await readLimitedBody(response, 8 * 1024 * 1024)).toString('utf8'),
+    );
     if (Number(root?.code) !== (provider === 'tikhub' ? 200 : 2000))
       throw new Error(
         `${provider} API 错误（${String(root?.code ?? '未知')}），请检查接口权限、密钥和余额`,

@@ -1,12 +1,39 @@
 import { fetch as modelFetch } from 'undici';
 import { modelDispatcher } from './model-transport.ts';
 import { createHash } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { redactModelContent } from './privacy.ts';
+import { guardedModelFetch, modelPolicy, ModelBudgetError } from './model-safety.ts';
+import {
+  RequestBudgetError,
+  ReceiptPersistenceError,
+  UncertainRequestError,
+  RestoredScopeError,
+} from './request-journal.ts';
 import { readLimitedBody } from './remote-media.ts';
 import { z } from 'zod';
 import type { Comment, Note, LlmSettings, SemanticReview } from '../shared/types.ts';
 import { configGet, configSet, get, put } from './store.ts';
 import { assessComment, commentThread, intentScore } from './domain.ts';
-import { activeCredentials, updateActive, updateServiceResult } from './services.ts';
+import {
+  activeCredentials,
+  serviceIdentity,
+  updateActive,
+  updateServiceResult,
+} from './services.ts';
+
+const serviceContext = new AsyncLocalStorage<{
+  settings: LlmSettings;
+  credentials: ReturnType<typeof activeCredentials>;
+}>();
+const textCredentials = () => serviceContext.getStore()?.credentials || activeCredentials('text');
+export function withTextService<T>(work: () => T): T {
+  if (serviceContext.getStore()) return work();
+  return serviceContext.run(
+    { settings: llmSettings(), credentials: activeCredentials('text') },
+    work,
+  );
+}
 
 const baseUrlSchema = z
   .string()
@@ -55,6 +82,7 @@ export const llmSettingsSchema = z
   })
   .strict();
 export function llmSettings(): LlmSettings {
+  if (serviceContext.getStore()) return serviceContext.getStore()!.settings;
   const active = activeCredentials('text');
   return {
     serviceId: active.id,
@@ -115,13 +143,13 @@ export function saveLlmSettings(input: unknown) {
 async function modelRequest(path: string, body?: unknown, signal?: AbortSignal) {
   const settings = llmSettings();
   if (!settings.baseUrl) throw new Error('请先保存模型服务地址');
-  const key = activeCredentials('text').key;
+  const key = textCredentials().key;
   let response: Awaited<ReturnType<typeof modelFetch>>;
   try {
-    response = await modelFetch(settings.baseUrl + path, {
+    const init = {
       dispatcher: modelDispatcher,
       method: body === undefined ? 'GET' : 'POST',
-      redirect: 'error',
+      redirect: 'error' as const,
       headers: {
         'Content-Type': 'application/json',
         ...(key ? { Authorization: 'Bearer ' + key } : {}),
@@ -130,8 +158,30 @@ async function modelRequest(path: string, body?: unknown, signal?: AbortSignal) 
       signal: signal
         ? AbortSignal.any([signal, AbortSignal.timeout(settings.requestTimeoutSeconds * 1000)])
         : AbortSignal.timeout(settings.requestTimeoutSeconds * 1000),
-    });
+    };
+    response = (
+      body === undefined
+        ? await modelFetch(settings.baseUrl + path, init)
+        : await guardedModelFetch(
+            'text',
+            textCredentials(),
+            settings.baseUrl + path,
+            init,
+            modelFetch as unknown as typeof fetch,
+            { inputBytes: Buffer.byteLength(JSON.stringify(body)) },
+          )
+    ) as Awaited<ReturnType<typeof modelFetch>>;
   } catch (error) {
+    if (
+      error instanceof ModelBudgetError ||
+      error instanceof RequestBudgetError ||
+      error instanceof ReceiptPersistenceError ||
+      error instanceof UncertainRequestError ||
+      error instanceof RestoredScopeError
+    )
+      throw error;
+    if (error instanceof Error && /预算|不确定|持久化|大小限制|事务/.test(error.message))
+      throw error;
     if (signal?.aborted) signal.throwIfAborted();
     if ((error as Error).name === 'TimeoutError')
       throw new Error(
@@ -174,11 +224,23 @@ export async function completion(
   messages: { role: 'system' | 'user'; content: string }[],
   signal?: AbortSignal,
 ) {
+  return withTextService(() => completeInternal(messages, signal));
+}
+async function completeInternal(
+  messages: { role: 'system' | 'user'; content: string }[],
+  signal?: AbortSignal,
+) {
   const model = llmSettings().model;
   if (!model) throw new Error('请先选择或填写模型 ID');
   const raw = await modelRequest(
     '/chat/completions',
-    { model, store: false, response_format: { type: 'json_object' }, messages },
+    {
+      model,
+      store: false,
+      max_tokens: modelPolicy().maxOutputTokens,
+      response_format: { type: 'json_object' },
+      messages: messages.map((m) => ({ ...m, content: redactModelContent(m.content) })),
+    },
     signal,
   );
   const envelope = z
@@ -249,13 +311,22 @@ function fingerprint(c: Comment, note: Note | undefined, comments: Comment[]) {
         input: semanticInput(c, note, comments),
         revision: configGet('llm:revision'),
         promptVersion: 'intent-semantic-3',
+        service: serviceIdentity(textCredentials()),
         model: llmSettings().model,
       }),
     )
     .digest('hex');
 }
-export function semanticFor(c: Comment, note: Note | undefined, comments: Comment[]) {
-  const stored = get<SemanticReview & { id: string }>('semanticReviews', c.id);
+export function semanticFor(
+  c: Comment,
+  note: Note | undefined,
+  comments: Comment[],
+  preloaded?: SemanticReview | null,
+) {
+  const stored =
+    preloaded === undefined
+      ? get<SemanticReview & { id: string }>('semanticReviews', c.id)
+      : preloaded;
   if (!stored || assessComment(c, note, Date.now(), comments).exclusions.length) return undefined;
   if (stored.inputHash !== fingerprint(c, note, comments)) return undefined;
   // A creator's purchase or answer cannot establish the reader's purchase status.
@@ -277,7 +348,10 @@ export function semanticFor(c: Comment, note: Note | undefined, comments: Commen
   }
   return stored;
 }
-export async function reviewSemantics(
+export async function reviewSemantics(...args: Parameters<typeof reviewSemanticsInternal>) {
+  return withTextService(() => reviewSemanticsInternal(...args));
+}
+async function reviewSemanticsInternal(
   comments: Comment[],
   notes: Note[],
   signal?: AbortSignal,

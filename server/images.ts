@@ -9,6 +9,8 @@ import { modelDispatcher } from './model-transport.ts';
 import { llmSettings } from './llm.ts';
 import { downloadMedia, readLimitedBody } from './remote-media.ts';
 import { activeCredentials, updateActive, updateServiceResult } from './services.ts';
+import { guardedModelFetch, currentModelOperation } from './model-safety.ts';
+import { redactModelText } from './privacy.ts';
 
 const baseUrlSchema = z
   .string()
@@ -257,8 +259,37 @@ async function requestOnce(
   source: { buffer: Buffer; mime: string } | null,
   prompt: string,
   count: number,
-  key: string,
+  credentials: ReturnType<typeof activeCredentials>,
+  operationId = currentModelOperation(),
 ) {
+  const key = credentials.key;
+  prompt = redactModelText(prompt);
+  const guarded: typeof externalFetch = (url, init) =>
+    guardedModelFetch(
+      'image',
+      credentials,
+      String(url),
+      init as unknown as RequestInit,
+      externalFetch as unknown as typeof fetch,
+      {
+        operationId:
+          operationId +
+          ':' +
+          createHash('sha256')
+            .update(
+              JSON.stringify([
+                settings.model,
+                prompt,
+                count,
+                settings.size,
+                settings.watermark,
+                source ? createHash('sha256').update(source.buffer).digest('hex') : null,
+              ]),
+            )
+            .digest('hex'),
+        count,
+      },
+    ) as unknown as ReturnType<typeof externalFetch>;
   const timeout = AbortSignal.timeout(300000);
   let response: Awaited<ReturnType<typeof externalFetch>>;
   if (settings.mode === 'edit' && source) {
@@ -272,7 +303,7 @@ async function requestOnce(
       new Blob([new Uint8Array(source.buffer)], { type: source.mime }),
       'source.' + extension(source.mime),
     );
-    response = await externalFetch(settings.baseUrl + '/images/edits', {
+    response = await guarded(settings.baseUrl + '/images/edits', {
       method: 'POST',
       dispatcher: modelDispatcher,
       headers: authHeaders(key),
@@ -281,7 +312,7 @@ async function requestOnce(
       signal: timeout,
     });
   } else {
-    response = await externalFetch(settings.baseUrl + '/images/generations', {
+    response = await guarded(settings.baseUrl + '/images/generations', {
       method: 'POST',
       dispatcher: modelDispatcher,
       headers: { 'Content-Type': 'application/json', ...authHeaders(key) },
@@ -320,6 +351,7 @@ async function requestOnce(
 
 interface GenerationRecord extends ImageGeneration {
   id: string;
+  createdAt?: string;
   inputHash: string;
   status: 'running' | 'completed' | 'failed';
 }
@@ -362,6 +394,7 @@ export async function generateVariants(
   const started = Date.now();
   const record: GenerationRecord = {
     id,
+    createdAt: new Date().toISOString(),
     inputHash,
     status: 'running',
     items: [],
@@ -382,7 +415,8 @@ export async function generateVariants(
         sources[i],
         input.prompt,
         input.count,
-        credentials.key,
+        credentials,
+        record.id + ':' + i,
       );
       for (const result of results) {
         record.items.push({ id: randomUUID(), url: await saveResult(result), source: targets[i] });
@@ -453,7 +487,7 @@ export async function testImageGeneration() {
     settings.mode === 'edit' ? { buffer: TEST_REFERENCE, mime: 'image/png' } : null,
     prompt,
     1,
-    credentials.key,
+    credentials,
   );
   const sample = await saveResult(results[0]);
   updateServiceResult(credentials, { testedAt: new Date().toISOString() });

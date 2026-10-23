@@ -37,6 +37,7 @@ import { useWorkspace } from '../context';
 import { PageHeading, Modal, Busy, SourceTag, Empty } from './ui';
 import { PlatformConnections } from './PlatformConnections';
 import { AccountForm } from './Accounts';
+import { DataSafety } from './DataSafety';
 import { JobLog } from './Discover';
 export function SettingsPage() {
   const { data, refresh, notify } = useWorkspace();
@@ -110,6 +111,7 @@ export function SettingsPage() {
       <PlatformConnections />
       <LlmSettingsPanel />
       <ImageSettingsPanel />
+      <DataSafety />
       <div className="settings-layout">
         <section className="panel settings-form">
           <div className="section-title">

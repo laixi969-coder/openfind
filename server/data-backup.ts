@@ -14,7 +14,7 @@ import {
   renameSync,
   rmSync,
 } from 'node:fs';
-import { dirname, join, resolve, relative } from 'node:path';
+import { dirname, join, resolve, relative, sep, isAbsolute } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const digest = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
@@ -77,7 +77,7 @@ export function createBackup(source: string, destination: string) {
   source = resolve(source);
   destination = resolve(destination);
   const rel = relative(source, destination);
-  if (!rel.startsWith('..') && !rel.startsWith('/'))
+  if (rel !== '..' && !rel.startsWith('..' + sep) && !isAbsolute(rel))
     throw new Error('备份目录不能放在源数据目录内');
   regular(join(source, 'openfind.sqlite'));
   regular(join(source, '.credential-key'));

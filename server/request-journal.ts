@@ -2,6 +2,7 @@ import { checkpointDigest, hashIdentity, migrateRequestGuards } from './collecti
 export { checkpointDigest } from './collection-integrity.ts';
 import type { Job, Note, Comment } from '../shared/types.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { readLimitedBody } from './remote-media.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   db,
@@ -23,6 +24,7 @@ export function claimEntity<T extends { id: string }>(kind: string, item: T) {
   );
 }
 interface Receipt {
+  category?: 'model';
   id: string;
   state: 'pending' | 'received';
   createdAt: string;
@@ -285,6 +287,8 @@ export function journaledFetch(
   beforeDispatch?: () => void,
   replayOnly = false,
   polling = false,
+  maxBytes = 8 * 1024 * 1024,
+  category?: 'model',
 ): typeof fetch {
   if (!scope)
     return async (url, init) => {
@@ -336,6 +340,7 @@ export function journaledFetch(
         beforeDispatch?.();
         assertOutsideTransaction();
         const receipt: Receipt = {
+          ...(category ? { category } : {}),
           id,
           state: 'pending',
           createdAt: new Date().toISOString(),
@@ -370,7 +375,8 @@ export function journaledFetch(
           // The durable claim precedes dispatch. Failure at any later boundary must
           // leave it in place: a timeout cannot tell us whether the vendor charged.
           const response = await transport(url, init);
-          const result = { status: response.status, body: await response.text() };
+          const bytes = await readLimitedBody(response, maxBytes);
+          const result = { status: response.status, body: bytes.toString('utf8') };
           const completed: Receipt = { ...receipt, state: 'received', response: result };
           retainResponse(completed);
           return persistResponse(completed);

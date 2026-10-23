@@ -34,12 +34,10 @@ app.use((req, res, next) => {
 // Xiaohongshu is API-only, including legacy login, inbox and detail routes.
 app.use((req, res, next) => {
   if ((req.body?.platform || req.body?.note?.platform) === 'xiaohongshu') {
-    res
-      .status(410)
-      .json({
-        error:
-          '小红书已改用 API 数据源，已关闭模拟浏览、自动采集及互动；请到设置配置 TikHub / RedFox',
-      });
+    res.status(410).json({
+      error:
+        '小红书已改用 API 数据源，已关闭模拟浏览、自动采集及互动；请到设置配置 TikHub / RedFox',
+    });
     return;
   }
   next();

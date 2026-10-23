@@ -300,6 +300,8 @@ test('live adapter handles pagination, dedup, throttling, account preflight and 
         mode: 'live',
         connectionType: 'http',
         providerUrl: 'http://127.0.0.1:' + (ms.address() as { port: number }).port,
+        token: '',
+        cookie: '',
         accountId: 'live-account',
         accountName: '真实测试账号',
         rememberCookie: false,

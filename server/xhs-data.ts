@@ -9,6 +9,7 @@ import {
   assertDispatchAllowed,
 } from './request-journal.ts';
 import { createHash } from 'node:crypto';
+import { readLimitedBody } from './remote-media.ts';
 import { z } from 'zod';
 import type { Comment, Note, SearchInput } from '../shared/types.ts';
 import { configGet, configSet, encrypt, decrypt, get, put, transaction } from './store.ts';
@@ -211,7 +212,10 @@ export function xhsClient(
       throw new Error(
         `${provider} HTTP ${response.status}，请检查密钥、余额或服务状态；未自动重试`,
       );
-    const data = unwrap(provider, parsePlatformJSON(await response.text()));
+    const data = unwrap(
+      provider,
+      parsePlatformJSON((await readLimitedBody(response, 8 * 1024 * 1024)).toString('utf8')),
+    );
     // A definitive pending poll can be polled again. A lost poll response cannot.
     if (query && ['pending', 'processing'].includes(data.status)) advancePendingPoll(response);
     return data;

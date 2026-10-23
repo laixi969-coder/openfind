@@ -1,6 +1,8 @@
 import { journaledFetch } from './request-journal.ts';
 import { z } from 'zod';
-import { configGet, decrypt } from './store.ts';
+import { configGet, configSet, db, decrypt, transaction } from './store.ts';
+import { serviceBaseUrl } from './services.ts';
+import { readLimitedBody } from './remote-media.ts';
 const noteSchema = z.object({
   id: z.string().min(1),
   title: z.string(),
@@ -42,15 +44,30 @@ export const schemas = {
     url: z.url().refine((value) => /^https?:\/\//.test(value), '发布回执必须是 HTTP(S) URL'),
   }),
 };
-const sessionCookies = new Map<string, string>();
+const sessionCookies = new Map<string, { value: string; provider: string }>();
+const providerIdentity = () => configGet('providerUrl').replace(/\/+$/, '');
+export function bindLegacyProviderCredentials() {
+  const identity = JSON.stringify(providerIdentity());
+  transaction(() => {
+    if (configGet('token') && !configGet('tokenProvider')) configSet('tokenProvider', identity);
+    for (const row of db
+      .prepare("SELECT key FROM config WHERE key LIKE 'cookie:%' AND value<>''")
+      .all()) {
+      const id = String(row.key).slice(7);
+      if (!configGet('cookieProvider:' + id)) configSet('cookieProvider:' + id, identity);
+    }
+  });
+}
 export const setSessionCookie = (value: string, id = configGet('accountId', 'demo-account')) => {
-  if (value) sessionCookies.set(id, value);
-  else sessionCookies.delete(id);
+  if (value) {
+    sessionCookies.set(id, { value, provider: providerIdentity() });
+    configSet('cookieProvider:' + id, JSON.stringify(providerIdentity()));
+  } else sessionCookies.delete(id);
 };
 export const hasCookie = (id = configGet('accountId', 'demo-account')) =>
   !!(sessionCookies.get(id) || configGet('cookie:' + id));
 export const getCookie = (id = configGet('accountId', 'demo-account')) =>
-  sessionCookies.get(id) || decrypt(configGet('cookie:' + id));
+  sessionCookies.get(id)?.value || decrypt(configGet('cookie:' + id));
 export async function providerCall<T>(
   path: string,
   body: unknown,
@@ -59,12 +76,20 @@ export async function providerCall<T>(
   requestScope?: string,
   beforeDispatch?: () => void,
 ): Promise<T> {
-  const base = configGet('providerUrl');
+  const base = serviceBaseUrl.parse(configGet('providerUrl'));
   if (!base) throw new Error('请先在连接设置中配置真实数据服务地址');
+  bindLegacyProviderCredentials();
   const token = decrypt(configGet('token'));
   const accountId =
     (body as { accountId?: string })?.accountId || configGet('accountId', 'demo-account');
   const cookie = getCookie(accountId);
+  if (
+    (token && configGet('tokenProvider') !== JSON.stringify(base.replace(/\/+$/, ''))) ||
+    (cookie &&
+      (sessionCookies.get(accountId)?.provider ??
+        JSON.parse(configGet('cookieProvider:' + accountId, 'null'))) !== base.replace(/\/+$/, ''))
+  )
+    throw new Error('凭证属于其他适配器地址，请在设置中重新输入或明确清空，不会向新服务转发');
   const response = await journaledFetch(
     requestScope,
     fetch,
@@ -82,5 +107,7 @@ export async function providerCall<T>(
       : AbortSignal.timeout(30_000),
   });
   if (!response.ok) throw new Error(`数据服务返回 HTTP ${response.status}，请检查连接与账号状态`);
-  return schema.parse(await response.json());
+  return schema.parse(
+    JSON.parse((await readLimitedBody(response, 8 * 1024 * 1024)).toString('utf8')),
+  );
 }

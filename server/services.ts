@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { ModelOption, ModelService } from '../shared/types.ts';
 import {
@@ -130,6 +130,14 @@ export function activeCredentials(kind: ServiceKind) {
     modelsSyncedAt: service?.modelsSyncedAt,
     testedAt: service?.testedAt,
   };
+}
+
+export function serviceIdentity(credentials = activeCredentials('text')) {
+  return createHash('sha256')
+    .update(
+      JSON.stringify([credentials.id, credentials.baseUrl, credentials.model, credentials.key]),
+    )
+    .digest('hex');
 }
 
 function write(service: StoredService) {

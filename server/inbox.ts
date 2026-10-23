@@ -12,12 +12,14 @@ import { suggestPrivateReply } from './llm.ts';
 import { intentScore } from './domain.ts';
 import { readCase, restricted } from './sales.ts';
 import { protectionStatus } from './protection.ts';
+import { serviceIdentity } from './services.ts';
 export const inboxTransport = {
   call: (body: unknown) => browserCall<NativeInbox>('/messaging', body),
 };
 const platformSchema = z.enum(['xiaohongshu', 'douyin']);
 const router = Router();
 const locks = new Set<Platform>();
+export const inboxBusy = () => locks.size > 0 || suggesting.size > 0;
 const draftHash = (t: InboxThread) =>
   createHash('sha256')
     .update(
@@ -25,6 +27,7 @@ const draftHash = (t: InboxThread) =>
         threadHash(t),
         configGet('sales:profile'),
         configGet('llm:revision'),
+        serviceIdentity(),
         'reply-policy-2',
       ]),
     )

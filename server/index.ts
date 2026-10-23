@@ -12,7 +12,8 @@ import {
 } from './douyin-data.ts';
 import { xhsClient, xhsSettings, saveXhsSettings, XhsPendingError } from './xhs-data.ts';
 import { acquisitionLimits } from '../shared/collection-limits.ts';
-import inboxRouter from './inbox.ts';
+import inboxRouter, { inboxBusy } from './inbox.ts';
+import { maintenanceRouter, maintenanceBusy } from './maintenance-router.ts';
 import salesRouter from './sales.ts';
 import { llmSettings, saveLlmSettings, syncModels, testLlm, semanticFor } from './llm.ts';
 import {
@@ -49,9 +50,12 @@ import {
   createService,
   activateService,
   deleteService,
+  serviceBaseUrl,
 } from './services.ts';
 import express from 'express';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
+import { withModelOperation, modelBudget, saveModelPolicy } from './model-safety.ts';
+import { workspaceState } from './workspace-state.ts';
 import { resolve } from 'node:path';
 import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -72,10 +76,17 @@ import { cachedJob } from './jobs-cache.ts';
 import { setTimeout as delay } from 'node:timers/promises';
 import JSZip from 'jszip';
 import { z } from 'zod';
-import { all, get, put, remove, configGet, configSet, encrypt } from './store.ts';
+import { all, get, put, remove, configGet, configSet, encrypt, transaction } from './store.ts';
 import { demoNotes, demoComments } from './demo.ts';
 import { parseIntent, toLead, assessComment, intentScore } from './domain.ts';
-import { providerCall, schemas, setSessionCookie, hasCookie, getCookie } from './provider.ts';
+import {
+  providerCall,
+  schemas,
+  setSessionCookie,
+  hasCookie,
+  getCookie,
+  bindLegacyProviderCredentials,
+} from './provider.ts';
 import { browserCall, browserScreenshot } from './platforms/client.ts';
 import { parseWorkLinks } from '../shared/work-links.ts';
 import {
@@ -109,9 +120,14 @@ import type {
   Account,
 } from '../shared/types.ts';
 export const app = express();
+let writeRequests = 0;
 app.disable('x-powered-by');
 app.use(express.json({ limit: '30mb' }));
 app.use('/api', (req, res, next) => {
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && maintenanceBusy()) {
+    res.status(409).json({ error: '资料维护正在进行，请稍后重试' });
+    return;
+  }
   const host = req.hostname;
   if (!['127.0.0.1', 'localhost', '::1', '[::1]'].includes(host)) {
     res.status(403).json({ error: '仅允许本机访问' });
@@ -132,8 +148,51 @@ app.use('/api', (req, res, next) => {
     res.status(403).json({ error: '不允许的请求来源' });
     return;
   }
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && !req.path.startsWith('/maintenance')) {
+    writeRequests++;
+    let released = false;
+    const release = () => {
+      if (!released) {
+        released = true;
+        writeRequests--;
+      }
+    };
+    res.once('finish', release);
+    res.once('close', release);
+  }
   next();
 });
+app.use('/api', (req, res, next) => {
+  if (
+    req.method !== 'POST' ||
+    !/\/(copy\/rewrite|llm\/test|images\/(test|variants)|insights\/(breakdown|comments|author|keywords)|workflows\/[^/]+\/review|inbox\/threads\/[^/]+\/suggest)$/.test(
+      req.path,
+    )
+  )
+    return next();
+  const hash = createHash('sha256')
+    .update(req.method + req.path + JSON.stringify(req.body))
+    .digest('hex');
+  const key = req.get('idempotency-key');
+  if (key && !z.uuid().safeParse(key).success) {
+    res.status(400).json({ error: '请求编号必须为 UUID' });
+    return;
+  }
+  const id = key || hash;
+  const accepted = transaction(() => {
+    const previous = get<{ id: string; hash: string }>('model-operations', id);
+    if (previous && previous.hash !== hash) return false;
+    if (!previous) put('model-operations', { id, hash });
+    return true;
+  });
+  if (!accepted) {
+    res.status(409).json({ error: '请求编号已用于其他内容，请核对后新建请求' });
+    return;
+  }
+  withModelOperation(id, next);
+});
+app.get('/api/model-budget', (_req, res) => res.json(modelBudget()));
+app.put('/api/model-budget', (req, res) => res.json(saveModelPolicy(req.body)));
 const settings = (): Settings => ({
   mode: configGet(
     'mode',
@@ -221,6 +280,10 @@ function log(j: Job, level: Job['logs'][number]['level'], message: string) {
 recoverWorkflows();
 const qualificationRuns = new Set<string>();
 const active = () => running.size > 0 || workflowRuns.size > 0 || qualificationRuns.size > 0;
+app.use(
+  '/api',
+  maintenanceRouter(() => active() || inboxBusy() || writeRequests > 0),
+);
 function currentLead(lead: Lead, comments = all<Comment>('comments')): Lead {
   const c = get<Comment>('comments', lead.commentId);
   const note = get<Note>('notes', lead.noteId);
@@ -502,26 +565,16 @@ export async function runJob(
   }
 }
 app.get('/api/health', (_req, res) => res.json({ ok: true, name: 'openfind' }));
-app.get('/api/state', (_req, res) => {
-  const comments = all<Comment>('comments');
-  const notes = all<Note>('notes');
-  res.json({
-    accounts: accounts(),
-    notes,
-    comments: comments.map((c) => ({
-      ...c,
-      semantic: semanticFor(
-        c,
-        notes.find((n) => n.id === c.noteId),
-        comments,
-      ),
-    })),
-    leads: all<Lead>('leads').map((l) => currentLead(l, comments)),
-    drafts: all<Draft>('drafts'),
-    jobs: all<Job>('jobs'),
-    workflows: all<AcquisitionWorkflow>('workflows'),
-    settings: settings(),
-  });
+app.get('/api/state', async (req, res) => {
+  const snapshot = workspaceState(settings, accounts);
+  res.set({ ETag: snapshot.etag, 'Cache-Control': 'private, no-cache', Vary: 'Accept-Encoding' });
+  if (req.get('if-none-match') === snapshot.etag) {
+    res.status(304).end();
+    return;
+  }
+  res.type('json');
+  if (req.acceptsEncodings('gzip')) res.set('Content-Encoding', 'gzip').send(await snapshot.gzip);
+  else res.send(snapshot.json);
 });
 const acquisitionSchema = z.object({
   keyword: z.string().trim().min(1).max(100),
@@ -878,6 +931,17 @@ app.post('/api/drafts', async (req, res) => {
     }
   }
   input.images = await backupDraftImages(input.images);
+  // A disconnected editor may finish its download after maintenance has begun.
+  // Revalidate local files immediately before the synchronous database commit.
+  for (const url of [...input.images, ...(input.video ? [input.video] : [])]) {
+    if (url.startsWith('/api/media/')) {
+      const path = join(dataDir, 'uploads', url.split('/').at(-1)!);
+      if (!existsSync(path) || !statSync(path).isFile()) {
+        res.status(409).json({ error: '保存期间素材已清理，请重新上传后保存；草稿未写入' });
+        return;
+      }
+    }
+  }
   // Downloads yield: re-read before committing so concurrent edits/deletion win.
   if (previous) {
     const current = get<Draft>('drafts', previous.id);
@@ -946,13 +1010,17 @@ app.post('/api/drafts/:id/result', async (req, res) => {
     publishedAt: note.publishedAt,
     checkedAt: now,
   };
-  const next: Draft = {
-    ...draft,
-    result,
-    revision: (draft.revision || 0) + 1,
-    updatedAt: now,
-  };
-  put('drafts', next);
+  const next = transaction(() => {
+    const current = get<Draft>('drafts', draft.id);
+    if (!current || (current.revision || 0) !== (draft.revision || 0)) return null;
+    const saved = { ...current, result, revision: (current.revision || 0) + 1, updatedAt: now };
+    put('drafts', saved);
+    return saved;
+  });
+  if (!next) {
+    res.status(409).json({ error: '拉取期间草稿已修改或删除，本次回填未覆盖记录，请重新核对' });
+    return;
+  }
   res.json(next);
 });
 const uploads = join(dataDir, 'uploads');
@@ -1254,7 +1322,7 @@ app.put('/api/settings', (req, res) => {
       mode: z.enum(['demo', 'live']),
       platform: z.enum(['xiaohongshu', 'douyin']).optional(),
       connectionType: z.enum(['browser', 'http']).optional(),
-      providerUrl: z.union([z.literal(''), z.url().refine((s) => /^https?:/.test(s))]),
+      providerUrl: serviceBaseUrl,
       token: z.string().max(10000).optional(),
       cookie: z.string().max(30000).optional(),
       rememberCookie: z.boolean(),
@@ -1266,11 +1334,27 @@ app.put('/api/settings', (req, res) => {
     res.status(409).json({ error: '请在采集结束后修改连接配置' });
     return;
   }
+  input.providerUrl = input.providerUrl.replace(/\/+$/, '');
+  const changed = input.providerUrl !== configGet('providerUrl').replace(/\/+$/, '');
+  if (
+    changed &&
+    ((input.token === undefined && configGet('token')) ||
+      (input.cookie === undefined && hasCookie(input.accountId)))
+  ) {
+    res
+      .status(400)
+      .json({ error: '更换适配器地址时，请重新输入或明确清空令牌与 Cookie，避免发送旧凭证' });
+    return;
+  }
+  bindLegacyProviderCredentials();
   for (const k of ['mode', 'providerUrl', 'accountName', 'accountId'] as const)
     configSet(k, input[k]);
   configSet('platform', input.platform || settings().platform || 'xiaohongshu');
   configSet('connectionType', input.connectionType || (input.providerUrl ? 'http' : 'browser'));
-  if (input.token !== undefined) configSet('token', input.token ? encrypt(input.token) : '');
+  if (input.token !== undefined) {
+    configSet('token', input.token ? encrypt(input.token) : '');
+    configSet('tokenProvider', JSON.stringify(input.providerUrl));
+  }
   if (input.cookie !== undefined) {
     setSessionCookie(input.cookie, input.accountId);
     configSet(
@@ -1569,7 +1653,10 @@ app.use(
         .json({ error: error.issues.map((x) => `${x.path.join('.')}: ${x.message}`).join('；') });
       return;
     }
-    res.status(500).json({ error: error instanceof Error ? error.message : '服务器错误' });
+    const code = (error as { statusCode?: number })?.statusCode;
+    res
+      .status(code && code >= 400 && code < 600 ? code : 500)
+      .json({ error: error instanceof Error ? error.message : '服务器错误' });
   },
 );
 if (process.env.NODE_ENV !== 'test') {
