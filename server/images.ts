@@ -272,21 +272,19 @@ async function requestOnce(
       init as unknown as RequestInit,
       externalFetch as unknown as typeof fetch,
       {
-        operationId:
-          operationId +
-          ':' +
-          createHash('sha256')
-            .update(
-              JSON.stringify([
-                settings.model,
-                prompt,
-                count,
-                settings.size,
-                settings.watermark,
-                source ? createHash('sha256').update(source.buffer).digest('hex') : null,
-              ]),
-            )
-            .digest('hex'),
+        operationId,
+        payloadHash: createHash('sha256')
+          .update(
+            JSON.stringify([
+              settings.model,
+              prompt,
+              count,
+              settings.size,
+              settings.watermark,
+              source ? createHash('sha256').update(source.buffer).digest('hex') : null,
+            ]),
+          )
+          .digest('hex'),
         count,
       },
     ) as unknown as ReturnType<typeof externalFetch>;

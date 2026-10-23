@@ -1,4 +1,93 @@
 import type { Comment, Lead, Note, LeadAssessment } from '../shared/types.ts';
+
+type ThreadIndex = {
+  byId: Map<string, Comment>;
+  replies: Map<string, Comment[]>;
+  byAuthor: Map<string, Map<string, Comment[]>>;
+  position: Map<string, number>;
+};
+let commentContext:
+  | {
+      comments: Comment[];
+      groups: Map<string, Comment[]>;
+      indexes: Map<string, ThreadIndex>;
+    }
+  | undefined;
+// Keep indexes within one read snapshot: callers may mutate their arrays later.
+export function withCommentIndex<T>(comments: Comment[], work: () => T): T {
+  const groups = new Map<string, Comment[]>();
+  for (const c of comments) {
+    const key = JSON.stringify([c.noteId, c.source]);
+    const group = groups.get(key);
+    if (group) group.push(c);
+    else groups.set(key, [c]);
+  }
+  const previous = commentContext;
+  commentContext = { comments, groups, indexes: new Map() };
+  try {
+    return work();
+  } finally {
+    commentContext = previous;
+  }
+}
+function indexedRoot(c: Comment, comments: Comment[]) {
+  const context = commentContext;
+  if (context?.comments !== comments) return undefined;
+  const key = JSON.stringify([c.noteId, c.source, c.platform || null]);
+  let index = context.indexes.get(key);
+  if (!index) {
+    const scoped = (context.groups.get(JSON.stringify([c.noteId, c.source])) || []).filter(
+      (x) => !c.platform || !x.platform || c.platform === x.platform,
+    );
+    const byId = new Map(scoped.map((x) => [x.id, x]));
+    const replies = new Map<string, Comment[]>();
+    const byAuthor = new Map<string, Map<string, Comment[]>>();
+    for (const x of scoped) {
+      let parentId = x.parentId;
+      const seen = new Set<string>();
+      for (let i = 0; i < 8 && parentId && !seen.has(parentId); i++) {
+        seen.add(parentId);
+        if (parentId !== x.id) {
+          const group = replies.get(parentId);
+          if (group) group.push(x);
+          else replies.set(parentId, [x]);
+          let authors = byAuthor.get(parentId);
+          if (!authors) byAuthor.set(parentId, (authors = new Map()));
+          const authored = authors.get(x.authorId);
+          if (authored) authored.push(x);
+          else authors.set(x.authorId, [x]);
+        }
+        parentId = byId.get(parentId)?.parentId || null;
+      }
+    }
+    index = { byId, replies, byAuthor, position: new Map(scoped.map((x, i) => [x.id, i])) };
+    context.indexes.set(key, index);
+  }
+  let root = c;
+  const seen = new Set([c.id]);
+  for (let i = 0; i < 8 && root.parentId; i++) {
+    const parent = index.byId.get(root.parentId);
+    if (!parent || seen.has(parent.id)) break;
+    seen.add(parent.id);
+    root = parent;
+  }
+  return { root, index };
+}
+// Scoring and semantic input only use the creator and the current person's replies.
+// Author indexes avoid rescanning thousands of unrelated replies under one hot root.
+export function commentEvidenceThread(c: Comment, note: Note | undefined, comments: Comment[]) {
+  const indexed = indexedRoot(c, comments);
+  if (!indexed) return commentThread(c, comments);
+  const { root, index } = indexed;
+  const authors = index.byAuthor.get(root.id);
+  const replies = [
+    ...(authors?.get(c.authorId) || []),
+    ...(note && note.authorId !== c.authorId ? authors?.get(note.authorId) || [] : []),
+  ]
+    .filter((x) => x.id !== c.id)
+    .sort((a, b) => index.position.get(a.id)! - index.position.get(b.id)!);
+  return { root, replies };
+}
 export function parseIntent(text: string) {
   const n = text.match(/(\d+)\s*[篇条个]/);
   const cn = text.match(/([一二两三四五六七八九十]+)\s*[篇条个]/)?.[1];
@@ -230,6 +319,12 @@ export function intentScore(
   };
 }
 export function commentThread(c: Comment, comments: Comment[]) {
+  const indexed = indexedRoot(c, comments);
+  if (indexed) {
+    const { root, index } = indexed;
+    const replies = index.replies.get(root.id) || [];
+    return { root, replies: root.id === c.id ? replies : replies.filter((x) => x.id !== c.id) };
+  }
   const scoped = comments.filter(
     (x) =>
       x.noteId === c.noteId &&
@@ -292,7 +387,7 @@ export function toLead(c: Comment, note?: Note, comments: Comment[] = []): Lead 
   };
 }
 export function assessComment(c: Comment, note?: Note, now = Date.now(), comments: Comment[] = []) {
-  const { root, replies } = commentThread(c, comments);
+  const { root, replies } = commentEvidenceThread(c, note, comments);
   const authorReplies = replies.filter(
     (x) =>
       !!note?.authorId &&

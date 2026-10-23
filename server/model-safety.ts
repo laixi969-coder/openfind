@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { configGet, configSet, get, put, transaction } from './store.ts';
 import { journaledFetch } from './request-journal.ts';
 import { serviceIdentity, type activeCredentials } from './services.ts';
+import type { DataSource } from '../shared/data-sources.ts';
 
 export const modelPolicySchema = z
   .object({
@@ -68,6 +69,12 @@ export function modelBudget() {
 export class ModelBudgetError extends Error {
   statusCode = 429;
 }
+export class ModelOperationConflict extends Error {
+  statusCode = 409;
+  constructor() {
+    super('该请求编号的模型、参数或资料已变化；未发送新请求，请先核对供应商结果后允许新建请求');
+  }
+}
 const operation = new AsyncLocalStorage<string>();
 let activeCalls = 0;
 export const modelsBusy = () => activeCalls > 0;
@@ -76,6 +83,21 @@ export function withModelOperation<T>(id: string, work: () => T): T {
 }
 export function currentModelOperation() {
   return operation.getStore() || randomUUID();
+}
+export function ensureModelOperation<T>(work: () => T): T {
+  return operation.getStore() ? work() : withModelOperation(randomUUID(), work);
+}
+const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+function bindOperation(kind: string, id: string, value: unknown) {
+  transaction(() => {
+    const previous = get<{ id: string; hash: string }>(kind, id);
+    const fingerprint = hash(value);
+    if (previous && previous.hash !== fingerprint) throw new ModelOperationConflict();
+    if (!previous) put(kind, { id, hash: fingerprint });
+  });
+}
+export function bindModelPlan(name: string, value: unknown) {
+  bindOperation('model-operation-plans', hash([currentModelOperation(), name]), value);
 }
 
 function reserve(kind: 'text' | 'image', inputBytes: number, count: number, service: string) {
@@ -135,18 +157,37 @@ export async function guardedModelFetch(
   url: string,
   init: RequestInit,
   transport: typeof fetch,
-  options: { operationId?: string; inputBytes?: number; count?: number } = {},
+  options: {
+    operationId?: string;
+    step?: string;
+    payloadHash?: string;
+    inputBytes?: number;
+    count?: number;
+    sources?: DataSource[];
+  } = {},
 ) {
   if (activeCalls >= 2)
     throw new ModelBudgetError('已有两个模型请求在执行，请等待完成后重试，尚未发送新请求');
   const identity = serviceIdentity(credentials);
+  const operationId = options.operationId || currentModelOperation();
+  const step = options.step || 'request';
+  // Stable logical identity is separate from the computed provider payload. A changed
+  // body/service must conflict, rather than sidestepping an uncertain receipt guard.
+  bindOperation('model-call-bindings', hash([kind, operationId, step]), [
+    identity,
+    url,
+    init.method || 'POST',
+    [...new Headers(init.headers)].sort(),
+    options.payloadHash || init.body || '',
+    options.sources || [],
+  ]);
   const scope =
     'model:' +
-    createHash('sha256')
-      .update(options.operationId || currentModelOperation())
-      .digest('hex') +
+    createHash('sha256').update(operationId).digest('hex') +
     ':' +
-    identity;
+    identity +
+    ':' +
+    hash(step);
   activeCalls++;
   try {
     return await journaledFetch(
@@ -157,6 +198,7 @@ export async function guardedModelFetch(
       false,
       kind === 'image' ? 60 * 1024 * 1024 : 2 * 1024 * 1024,
       'model',
+      options.sources || [],
     )(url, init);
   } finally {
     activeCalls--;

@@ -86,6 +86,7 @@ export function maintenanceRouter(busy: () => boolean) {
         confirm: z.boolean().default(false),
         token: z.string().optional(),
         includeBackups: z.boolean().default(false),
+        includeLegacyModelReceipts: z.boolean().default(false),
       })
       .strict()
       .parse(req.body);
@@ -97,6 +98,7 @@ export function maintenanceRouter(busy: () => boolean) {
                 input.leadId,
                 z.string().min(1).parse(input.token),
                 input.includeBackups,
+                input.includeLegacyModelReceipts,
               )
             : forgetPlan(input.leadId),
         ),

@@ -158,7 +158,6 @@ export function forgetPlan(leadId: string) {
       (lead.authorId ? c.authorId === lead.authorId : c.id === lead.commentId),
   );
   const ids = new Set([...leads.map((l) => l.id), ...comments.map((c) => c.id)]);
-  const texts = new Set(comments.map((c) => c.body).filter((t) => t.length >= 8));
   const threads = all<InboxThread>('inboxThreads').filter(
     (t) =>
       lead.source === 'live' &&
@@ -167,8 +166,15 @@ export function forgetPlan(leadId: string) {
   );
   threads.forEach((t) => {
     ids.add(t.id);
-    for (const m of t.messages) if (m.text.length >= 8) texts.add(m.text);
   });
+  const sourceKey = (kind: string, id: string) => JSON.stringify([kind, id]);
+  const sourceIds = new Set([
+    ...leads.map((l) => sourceKey('leads', l.id)),
+    ...comments.map((c) => sourceKey('comments', c.id)),
+    ...threads.map((t) => sourceKey('inboxThreads', t.id)),
+  ]);
+  const relatedSources = (sources: { kind: string; id: string }[]) =>
+    sources.some((source) => sourceIds.has(sourceKey(source.kind, source.id)));
   const contains = (value: unknown): boolean => {
     if (typeof value === 'string') {
       if (ids.has(value)) return true;
@@ -200,29 +206,42 @@ export function forgetPlan(leadId: string) {
     'insights',
     'request-receipts',
   ]);
-  const rawContains = (value: unknown): boolean => {
-    if (typeof value === 'string') {
-      if (texts.has(value) || (!!lead.authorId && value === lead.authorId)) return true;
-      if (/^[\[{]/.test(value)) {
-        try {
-          return rawContains(JSON.parse(value));
-        } catch {
-          /* raw response */
-        }
-      }
-      return !!lead.authorId && lead.authorId.length >= 8 && value.includes(lead.authorId);
+  // Follow recorded input relationships, not coincidentally equal natural-language text.
+  const dependents = new Map<string, string[]>();
+  for (const r of entities) {
+    if (r.kind !== 'insights' || !Array.isArray(r.value.sources)) continue;
+    for (const source of r.value.sources) {
+      const key = sourceKey(source.kind, source.id);
+      const group = dependents.get(key);
+      if (group) group.push(r.id);
+      else dependents.set(key, [r.id]);
     }
-    if (Array.isArray(value)) return value.some(rawContains);
-    return !!value && typeof value === 'object' && Object.values(value).some(rawContains);
-  };
+  }
+  const queue = [...sourceIds];
+  for (let i = 0; i < queue.length; i++)
+    for (const id of dependents.get(queue[i]) || [])
+      if (!sourceIds.has(sourceKey('insights', id))) {
+        ids.add(id);
+        const key = sourceKey('insights', id);
+        sourceIds.add(key);
+        queue.push(key);
+      }
   for (const r of entities) {
     if (!kinds.has(r.kind)) continue;
+    if (
+      r.kind === 'insights' ||
+      (r.kind === 'request-receipts' &&
+        r.value.category === 'model' &&
+        Array.isArray(r.value.sources))
+    ) {
+      if (sourceIds.has(sourceKey(r.kind, r.id)) || relatedSources(r.value.sources || [])) add(r);
+      continue;
+    }
     if (r.kind === 'comments' || r.kind === 'leads' || r.kind === 'inboxThreads') {
       if (ids.has(r.id)) add(r);
     } else if (
       contains(r.value) ||
-      (r.kind === 'semanticReviewHistory' && comments.some((c) => r.id.startsWith(c.id + ':'))) ||
-      (['request-receipts', 'xhs-api-tasks', 'insights'].includes(r.kind) && rawContains(r.value))
+      (r.kind === 'semanticReviewHistory' && comments.some((c) => r.id.startsWith(c.id + ':')))
     )
       add(r);
   }
@@ -238,6 +257,15 @@ export function forgetPlan(leadId: string) {
       add(r);
   const list = [...deletions.values()].sort((a, b) => (a.kind + a.id).localeCompare(b.kind + b.id));
   const backups = managedBackups();
+  const legacyModelReceipts = entities
+    .filter(
+      (r) =>
+        r.kind === 'request-receipts' &&
+        r.value.category === 'model' &&
+        r.value.response &&
+        !Array.isArray(r.value.sources),
+    )
+    .map((r) => r.id);
   return {
     leadId,
     entries: list,
@@ -248,12 +276,14 @@ export function forgetPlan(leadId: string) {
       ]),
     ),
     managedBackups: backups.length,
+    legacyModelReceipts,
     token: createHash('sha256')
       .update(
         JSON.stringify([
           lead,
           list,
           backups,
+          legacyModelReceipts,
           db.prepare('SELECT total_changes() n').get(),
           db.prepare('PRAGMA data_version').get(),
         ]),
@@ -261,9 +291,26 @@ export function forgetPlan(leadId: string) {
       .digest('hex'),
   };
 }
-export function forgetCustomer(leadId: string, token: string, includeBackups: boolean) {
+export function forgetCustomer(
+  leadId: string,
+  token: string,
+  includeBackups: boolean,
+  includeLegacyModelReceipts = false,
+) {
   const plan = forgetPlan(leadId);
   if (plan.token !== token) throw new Error('客户或清除范围已变化，请重新预览后确认');
+  if (plan.legacyModelReceipts.length && !includeLegacyModelReceipts)
+    throw Object.assign(
+      new Error('旧版模型回执没有客户来源记录，请先确认清除这些原始回执，避免遗漏客户文本'),
+      { statusCode: 409 },
+    );
+  if (includeLegacyModelReceipts)
+    for (const id of plan.legacyModelReceipts)
+      if (!plan.entries.some((r) => r.kind === 'request-receipts' && r.id === id))
+        plan.entries.push({ kind: 'request-receipts', id });
+  plan.counts['request-receipts'] = plan.entries.filter(
+    (r) => r.kind === 'request-receipts',
+  ).length;
   transaction(() => {
     const removedJobs = new Set(plan.entries.filter((r) => r.kind === 'jobs').map((r) => r.id));
     const removedReceipts = new Set(

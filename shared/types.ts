@@ -371,6 +371,7 @@ export type InsightKind =
   'angle' | 'structure' | 'hook' | 'voice' | 'pain' | 'objection' | 'deal' | 'forbidden';
 export type InsightSource = 'manual' | 'breakdown' | 'comments' | 'deal';
 export interface InsightCard {
+  sources?: import('./data-sources.ts').DataSource[];
   id: string;
   platform: Platform | 'all';
   kind: InsightKind;
@@ -388,6 +389,7 @@ export interface InsightCard {
 }
 // 拆解与归集的产出先作为候选返回，用户确认后才写进知识库。
 export interface InsightCandidate {
+  sources?: import('./data-sources.ts').DataSource[];
   kind: InsightKind;
   title: string;
   body: string;

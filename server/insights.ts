@@ -25,6 +25,9 @@ import type {
 } from '../shared/types.ts';
 import { all, get, put, remove } from './store.ts';
 import { completion, llmSettings } from './llm.ts';
+import { dataSourceSchema } from '../shared/data-sources.ts';
+import { ModelOperationConflict, ModelBudgetError } from './model-safety.ts';
+import { UncertainRequestError, ReceiptPersistenceError } from './request-journal.ts';
 import type { SalesCase } from '../shared/sales.ts';
 
 export const INSIGHT_KINDS = [
@@ -51,6 +54,7 @@ const cardSchema = z
     evidence: z.array(text(500)).max(8).default([]),
     source: z.enum(sources).default('manual'),
     sourceNoteId: z.string().max(200).optional(),
+    sources: z.array(dataSourceSchema).max(1000).optional(),
     enabled: z.boolean().default(true),
   })
   .strict();
@@ -127,6 +131,7 @@ export function adoptCandidates(input: unknown) {
             body: text(2000),
             tags: z.array(text(24)).max(12).default([]),
             evidence: z.array(text(500)).max(8).default([]),
+            sources: z.array(dataSourceSchema).max(1000).optional(),
           })
           .strict(),
       ),
@@ -144,6 +149,7 @@ export function adoptCandidates(input: unknown) {
         tags: card.tags,
         evidence: card.evidence,
         source: v.source,
+        sources: card.sources,
         ...(v.sourceNoteId ? { sourceNoteId: v.sourceNoteId } : {}),
         enabled: true,
       }),
@@ -432,6 +438,12 @@ export async function breakdownNote(noteId: string, signal?: AbortSignal): Promi
       { role: 'user', content: JSON.stringify({ untrustedMaterial: payload }) },
     ],
     signal,
+    {
+      sources: [
+        { kind: 'notes', id: note.id },
+        ...comments.map((c) => ({ kind: 'comments' as const, id: c.id })),
+      ],
+    },
   );
   const parsed = cardOutput.safeParse(raw);
   if (!parsed.success) throw new Error('模型返回的拆解结果结构不符合约定，请重试或换一个模型');
@@ -441,6 +453,8 @@ export async function breakdownNote(noteId: string, signal?: AbortSignal): Promi
       toCandidate(c, ['angle', 'structure', 'hook', 'voice', 'pain', 'objection'], sourceTexts),
     )
     .filter((c): c is InsightCandidate => !!c);
+  // Every card is derived from this exact batch, even if it paraphrases the input.
+  for (const card of cards) card.sources = comments.map((c) => ({ kind: 'comments', id: c.id }));
   if (!cards.length)
     throw new Error('拆解结果没有可核对的原文依据，已全部丢弃；请换一条评论更多的作品');
   const allComments = all<Comment>('comments').filter((c) => c.noteId === note.id);
@@ -510,6 +524,7 @@ export async function digestComments(input: unknown, signal?: AbortSignal): Prom
       },
     ],
     signal,
+    { sources: sample.map((c) => ({ kind: 'comments', id: c.id })) },
   );
   const parsed = cardOutput.safeParse(raw);
   if (!parsed.success) throw new Error('模型返回的归集结果结构不符合约定，请重试或换一个模型');
@@ -517,6 +532,7 @@ export async function digestComments(input: unknown, signal?: AbortSignal): Prom
   const cards = parsed.data.cards
     .map((c) => toCandidate(c, ['pain', 'objection'], sourceTexts))
     .filter((c): c is InsightCandidate => !!c);
+  for (const card of cards) card.sources = sample.map((c) => ({ kind: 'comments', id: c.id }));
   if (!cards.length)
     throw new Error('归集结果没有可核对的评论原话，已全部丢弃；请采集更多评论后重试');
   return {
@@ -663,6 +679,7 @@ async function expandKeywords(
         },
       ],
       signal,
+      { sources: corpus.slice(0, 40).map((c) => ({ kind: 'comments', id: c.id })) },
     );
     const parsed = z
       .object({
@@ -697,7 +714,14 @@ async function expandKeywords(
       suggestions: [...base.suggestions, ...extra].slice(0, v.limit),
       model: settings.model,
     };
-  } catch {
+  } catch (error) {
+    if (
+      error instanceof ModelOperationConflict ||
+      error instanceof ModelBudgetError ||
+      error instanceof UncertainRequestError ||
+      error instanceof ReceiptPersistenceError
+    )
+      throw error;
     return base;
   }
 }
@@ -862,6 +886,7 @@ export async function authorBreakdown(
       },
     ],
     signal,
+    { sources: works.slice(0, 12).map((n) => ({ kind: 'notes', id: n.id })) },
   );
   const parsed = cardOutput.safeParse(raw);
   if (!parsed.success) throw new Error('模型返回的账号分析结构不符合约定，请重试或换一个模型');

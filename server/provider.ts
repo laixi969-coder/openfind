@@ -68,6 +68,13 @@ export const hasCookie = (id = configGet('accountId', 'demo-account')) =>
   !!(sessionCookies.get(id) || configGet('cookie:' + id));
 export const getCookie = (id = configGet('accountId', 'demo-account')) =>
   sessionCookies.get(id)?.value || decrypt(configGet('cookie:' + id));
+export function cookieMatchesProvider(id: string, provider = providerIdentity()) {
+  return (
+    !hasCookie(id) ||
+    (sessionCookies.get(id)?.provider ?? JSON.parse(configGet('cookieProvider:' + id, 'null'))) ===
+      provider.replace(/\/+$/, '')
+  );
+}
 export async function providerCall<T>(
   path: string,
   body: unknown,
@@ -85,9 +92,7 @@ export async function providerCall<T>(
   const cookie = getCookie(accountId);
   if (
     (token && configGet('tokenProvider') !== JSON.stringify(base.replace(/\/+$/, ''))) ||
-    (cookie &&
-      (sessionCookies.get(accountId)?.provider ??
-        JSON.parse(configGet('cookieProvider:' + accountId, 'null'))) !== base.replace(/\/+$/, ''))
+    !cookieMatchesProvider(accountId, base)
   )
     throw new Error('凭证属于其他适配器地址，请在设置中重新输入或明确清空，不会向新服务转发');
   const response = await journaledFetch(

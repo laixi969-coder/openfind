@@ -1,6 +1,7 @@
 import { checkpointDigest, hashIdentity, migrateRequestGuards } from './collection-integrity.ts';
 export { checkpointDigest } from './collection-integrity.ts';
 import type { Job, Note, Comment } from '../shared/types.ts';
+import type { DataSource } from '../shared/data-sources.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { readLimitedBody } from './remote-media.ts';
 import { createHash, randomUUID } from 'node:crypto';
@@ -25,6 +26,7 @@ export function claimEntity<T extends { id: string }>(kind: string, item: T) {
 }
 interface Receipt {
   category?: 'model';
+  sources?: DataSource[];
   id: string;
   state: 'pending' | 'received';
   createdAt: string;
@@ -151,9 +153,10 @@ export class ResponseCapacityError extends RequestBudgetError {
   }
 }
 export class UncertainRequestError extends Error {
-  constructor() {
+  constructor(reason = '') {
     super(
-      '请求仍在执行或结果不确定，可能已计费；已阻止自动重发。请先在供应商后台核对，确认后再新建任务',
+      (reason ? reason + '；' : '') +
+        '请求仍在执行或结果不确定，可能已计费；已阻止自动重发。请先在供应商后台核对，确认后再新建任务',
     );
   }
 }
@@ -289,6 +292,7 @@ export function journaledFetch(
   polling = false,
   maxBytes = 8 * 1024 * 1024,
   category?: 'model',
+  sources?: DataSource[],
 ): typeof fetch {
   if (!scope)
     return async (url, init) => {
@@ -341,6 +345,7 @@ export function journaledFetch(
         assertOutsideTransaction();
         const receipt: Receipt = {
           ...(category ? { category } : {}),
+          ...(sources ? { sources } : {}),
           id,
           state: 'pending',
           createdAt: new Date().toISOString(),

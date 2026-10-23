@@ -235,7 +235,10 @@ async function generateSuggestionInternal(id: string) {
   const profile: SalesProfile = JSON.parse(
     configGet('sales:profile', JSON.stringify(emptySalesProfile)),
   );
-  const result = await suggestPrivateReply({ originalComment, profile: { ...profile }, messages });
+  const result = await suggestPrivateReply({ originalComment, profile: { ...profile }, messages }, [
+    { kind: 'inboxThreads', id },
+    ...(t.leadId ? [{ kind: 'leads' as const, id: t.leadId }] : []),
+  ]);
   const latest = thread(id);
   assertContact(latest);
   if (draftHash(latest) !== hash) throw new Error('生成期间会话已变化，请重新生成');

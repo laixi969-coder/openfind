@@ -54,7 +54,13 @@ import {
 } from './services.ts';
 import express from 'express';
 import { randomUUID, createHash } from 'node:crypto';
-import { withModelOperation, modelBudget, saveModelPolicy } from './model-safety.ts';
+import {
+  withModelOperation,
+  modelBudget,
+  saveModelPolicy,
+  ModelOperationConflict,
+  ModelBudgetError,
+} from './model-safety.ts';
 import { workspaceState } from './workspace-state.ts';
 import { resolve } from 'node:path';
 import { existsSync, mkdirSync, statSync } from 'node:fs';
@@ -86,6 +92,7 @@ import {
   hasCookie,
   getCookie,
   bindLegacyProviderCredentials,
+  cookieMatchesProvider,
 } from './provider.ts';
 import { browserCall, browserScreenshot } from './platforms/client.ts';
 import { parseWorkLinks } from '../shared/work-links.ts';
@@ -180,13 +187,16 @@ app.use('/api', (req, res, next) => {
   }
   const id = key || hash;
   const accepted = transaction(() => {
-    const previous = get<{ id: string; hash: string }>('model-operations', id);
-    if (previous && previous.hash !== hash) return false;
-    if (!previous) put('model-operations', { id, hash });
+    const previous = get<{ id: string; hash: string; version?: number }>('model-operations', id);
+    // Legacy operations did not bind computed model inputs. Never silently renew one.
+    if (previous && (previous.hash !== hash || previous.version !== 2)) return false;
+    if (!previous) put('model-operations', { id, hash, version: 2 });
     return true;
   });
   if (!accepted) {
-    res.status(409).json({ error: '请求编号已用于其他内容，请核对后新建请求' });
+    res
+      .status(409)
+      .json({ error: '请求编号已用于其他内容或来自旧版本，请核对供应商结果后允许新建请求' });
     return;
   }
   withModelOperation(id, next);
@@ -1209,7 +1219,12 @@ app.post('/api/insights/keywords', async (req, res) => {
   try {
     res.json(await suggestKeywords(req.body));
   } catch (error) {
-    if (error instanceof z.ZodError) throw error;
+    if (
+      error instanceof z.ZodError ||
+      error instanceof ModelOperationConflict ||
+      error instanceof ModelBudgetError
+    )
+      throw error;
     res.status(502).json({ error: error instanceof Error ? error.message : '搜索词挖掘失败' });
   }
 });
@@ -1347,6 +1362,10 @@ app.put('/api/settings', (req, res) => {
     return;
   }
   bindLegacyProviderCredentials();
+  if (input.cookie === undefined && !cookieMatchesProvider(input.accountId, input.providerUrl)) {
+    res.status(400).json({ error: '该账号的 Cookie 属于其他适配器，请重新输入或明确清空后保存' });
+    return;
+  }
   for (const k of ['mode', 'providerUrl', 'accountName', 'accountId'] as const)
     configSet(k, input[k]);
   configSet('platform', input.platform || settings().platform || 'xiaohongshu');

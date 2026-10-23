@@ -40,6 +40,7 @@ type Forget = {
   counts: Record<string, number>;
   managedBackups: number;
   leadId: string;
+  legacyModelReceipts: string[];
 };
 const labels: Record<keyof Policy, string> = {
   textRequests: '每日文字调用上限',
@@ -62,6 +63,7 @@ export function DataSafety() {
   const [search, setSearch] = useState('');
   const [leadId, setLeadId] = useState('');
   const [includeBackups, setIncludeBackups] = useState(false);
+  const [includeLegacyModelReceipts, setIncludeLegacyModelReceipts] = useState(false);
   async function load() {
     const [b, m] = await Promise.all([
       api<Budget>('/model-budget'),
@@ -308,7 +310,10 @@ export function DataSafety() {
           className="btn"
           disabled={!leadId}
           onClick={() =>
-            void action(async () => setForget(await api<Forget>('/maintenance/forget', { leadId })))
+            void action(async () => {
+              setIncludeLegacyModelReceipts(false);
+              setForget(await api<Forget>('/maintenance/forget', { leadId }));
+            })
           }
         >
           预览资料清除范围
@@ -319,6 +324,17 @@ export function DataSafety() {
               关联记录：{JSON.stringify(forget.counts)}；本应用管理的备份 {forget.managedBackups}{' '}
               份。
             </p>
+            {forget.legacyModelReceipts.length > 0 && (
+              <label>
+                <input
+                  type="checkbox"
+                  checked={includeLegacyModelReceipts}
+                  onChange={(e) => setIncludeLegacyModelReceipts(e.target.checked)}
+                />{' '}
+                同时清除 {forget.legacyModelReceipts.length}{' '}
+                条旧版无来源模型原始回执（可能包含其他客户；保留已保存的复核结果和防重标记，旧响应将无法回放）
+              </label>
+            )}
             <label>
               <input
                 type="checkbox"
@@ -329,6 +345,7 @@ export function DataSafety() {
             </label>
             <button
               className="btn"
+              disabled={forget.legacyModelReceipts.length > 0 && !includeLegacyModelReceipts}
               onClick={() => {
                 if (
                   window.confirm(
@@ -342,6 +359,7 @@ export function DataSafety() {
                       token: forget.token,
                       confirm: true,
                       includeBackups,
+                      includeLegacyModelReceipts,
                     });
                     setForget(null);
                     setLeadId('');
